@@ -33,11 +33,12 @@ export default function Playground() {
   const handleSend = () => {
     if (!inputValue.trim()) return;
     const now = new Date().toLocaleTimeString();
-    const userMsg: ChatMessage = { role: 'user', content: inputValue, timestamp: now };
+    const msg = inputValue.trim();
+    const userMsg: ChatMessage = { role: 'user', content: msg, timestamp: now };
     setMessages(prev => [...prev, userMsg]);
     setInputValue('');
 
-    sendMut.mutate({ tenant_id: tenantId, message: inputValue, mode }, {
+    sendMut.mutate({ tenant_id: tenantId, message: msg, mode }, {
       onSuccess: (data) => {
         const assistantMsg: ChatMessage = { role: 'assistant', content: data.response, timestamp: new Date().toLocaleTimeString() };
         setMessages(prev => [...prev, assistantMsg]);
@@ -45,23 +46,23 @@ export default function Playground() {
       },
       onError: (err) => {
         const errMsg = mode === 'live'
-          ? '⚠️ AgentCore cold start may take ~25s on first request. Retrying automatically...'
+          ? '⏳ Agent is warming up (cold start ~25s). Retrying...'
           : '⚠️ Error communicating with agent';
         setMessages(prev => [...prev, { role: 'assistant', content: errMsg, timestamp: new Date().toLocaleTimeString() }]);
         // Auto-retry once for live mode (cold start)
         if (mode === 'live') {
           setTimeout(() => {
-            sendMut.mutate({ tenant_id: tenantId, message: inputValue, mode }, {
+            sendMut.mutate({ tenant_id: tenantId, message: msg, mode }, {
               onSuccess: (data) => {
                 const retryMsg: ChatMessage = { role: 'assistant', content: data.response, timestamp: new Date().toLocaleTimeString() };
                 setMessages(prev => [...prev, retryMsg]);
                 setLastPlanE(data.plan_e);
               },
               onError: () => {
-                setMessages(prev => [...prev, { role: 'assistant', content: '⚠️ AgentCore still starting up. Please try again in 30 seconds.', timestamp: new Date().toLocaleTimeString() }]);
+                setMessages(prev => [...prev, { role: 'assistant', content: 'Agent is still starting up. Please try again in ~30 seconds.', timestamp: new Date().toLocaleTimeString() }]);
               },
             });
-          }, 5000);
+          }, 3000);
         }
       },
     });

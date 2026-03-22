@@ -61,11 +61,26 @@ export default function PortalChat() {
         timestamp: new Date().toISOString(), source: resp.source, model: resp.model,
       }]);
     } catch (e: any) {
+      // Auto-retry once — AgentCore cold start takes ~25s, first request often fails
       setMessages(prev => [...prev, {
         id: Date.now() + 1, role: 'assistant',
-        content: `Sorry, I encountered an error: ${e.message}. Please try again.`,
-        timestamp: new Date().toISOString(), source: 'error',
+        content: '⏳ Agent is warming up (first request). Retrying...',
+        timestamp: new Date().toISOString(), source: 'warmup',
       }]);
+      try {
+        await new Promise(r => setTimeout(r, 3000));
+        const retry = await api.post<{ response: string; agentName?: string; source?: string; model?: string }>('/portal/chat', { message: userMsg.content });
+        setMessages(prev => [...prev, {
+          id: Date.now() + 2, role: 'assistant', content: retry.response,
+          timestamp: new Date().toISOString(), source: retry.source, model: retry.model,
+        }]);
+      } catch {
+        setMessages(prev => [...prev, {
+          id: Date.now() + 2, role: 'assistant',
+          content: 'Agent is still starting up. Please try again in ~30 seconds.',
+          timestamp: new Date().toISOString(), source: 'error',
+        }]);
+      }
     } finally {
       setSending(false);
     }
