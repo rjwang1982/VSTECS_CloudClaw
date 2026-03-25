@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { FolderOpen, FolderClosed, File, Lock, Edit3, User, ChevronRight, ChevronDown, Eye, GitCompare, Save, Globe, Briefcase, Bot, ArrowRight, Loader, Search } from 'lucide-react';
+import { FolderOpen, FolderClosed, File, Lock, Edit3, User, ChevronRight, ChevronDown, Eye, GitCompare, Save, Globe, Briefcase, Bot, ArrowRight, Loader, Search, Code, BookOpen } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
 import { Card, Badge, Button, PageHeader } from '../../components/ui';
 import { useAgents, usePositions, useWorkspaceTree } from '../../hooks/useApi';
 import { api } from '../../api/client';
@@ -110,6 +111,7 @@ export default function Workspace() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [filterText, setFilterText] = useState('');
+  const [viewMode, setViewMode] = useState<'raw' | 'rendered'>('rendered');
 
   // Set agent from URL param or default
   useEffect(() => {
@@ -200,6 +202,11 @@ export default function Workspace() {
         description="Three-layer file system — Global (IT locked) → Position → Personal"
         actions={
           <div className="flex gap-2">
+            {selectedFile && selectedFile.name.endsWith('.md') && selectedFile.locked && (
+              <Button variant={viewMode === 'rendered' ? 'primary' : 'default'} size="sm" onClick={() => setViewMode(viewMode === 'raw' ? 'rendered' : 'raw')}>
+                {viewMode === 'raw' ? <><BookOpen size={14} /> Rendered</> : <><Code size={14} /> Raw</>}
+              </Button>
+            )}
             <Button variant="primary" disabled={!selectedFile || selectedFile.locked || saving} onClick={handleSave}>
               <Save size={16} /> {saving ? '✓ Saved' : 'Save'}
             </Button>
@@ -314,10 +321,27 @@ export default function Workspace() {
               </div>
 
               {selectedFile.locked ? (
-                <pre className={clsx('rounded-2xl p-4 text-sm text-text-secondary whitespace-pre-wrap font-mono leading-relaxed min-h-[450px] max-h-[550px] overflow-y-auto border-l-2',
-                  layerConfig[selectedFile.layer].bg, layerConfig[selectedFile.layer].border)}>
-                  {fileContent}
-                </pre>
+                selectedFile.name.endsWith('.md') && viewMode === 'rendered' ? (
+                  <div className={clsx('rounded-2xl p-5 min-h-[450px] max-h-[550px] overflow-y-auto border-l-2 prose prose-invert prose-sm max-w-none',
+                    '[&_h1]:text-lg [&_h1]:font-bold [&_h1]:mt-4 [&_h1]:mb-2',
+                    '[&_h2]:text-base [&_h2]:font-semibold [&_h2]:mt-3 [&_h2]:mb-1.5',
+                    '[&_h3]:text-sm [&_h3]:font-medium [&_h3]:mt-2 [&_h3]:mb-1',
+                    '[&_p]:my-1.5 [&_ul]:my-1 [&_ol]:my-1 [&_li]:my-0.5',
+                    '[&_code]:bg-surface-container-highest [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded-lg [&_code]:text-xs',
+                    '[&_pre]:bg-surface-container-highest [&_pre]:p-3 [&_pre]:rounded-xl [&_pre]:my-2',
+                    '[&_table]:text-xs [&_th]:px-3 [&_th]:py-1.5 [&_th]:text-left [&_th]:border-b [&_th]:border-dark-border/30',
+                    '[&_td]:px-3 [&_td]:py-1 [&_td]:border-b [&_td]:border-dark-border/20',
+                    '[&_strong]:text-text-primary [&_a]:text-primary',
+                    '[&_blockquote]:border-l-2 [&_blockquote]:border-primary/30 [&_blockquote]:pl-3 [&_blockquote]:text-text-secondary',
+                    layerConfig[selectedFile.layer].bg, layerConfig[selectedFile.layer].border)}>
+                    <ReactMarkdown>{fileContent}</ReactMarkdown>
+                  </div>
+                ) : (
+                  <pre className={clsx('rounded-2xl p-4 text-sm text-text-secondary whitespace-pre-wrap font-mono leading-relaxed min-h-[450px] max-h-[550px] overflow-y-auto border-l-2',
+                    layerConfig[selectedFile.layer].bg, layerConfig[selectedFile.layer].border)}>
+                    {fileContent}
+                  </pre>
+                )
               ) : (
                 <textarea
                   value={editContent}
