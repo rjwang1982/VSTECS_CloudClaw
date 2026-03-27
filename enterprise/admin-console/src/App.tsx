@@ -23,6 +23,7 @@ import AuditLog from './pages/AuditLog';
 import Usage from './pages/Usage';
 import Playground from './pages/Playground';
 import Settings from './pages/Settings';
+import SecurityCenter from './pages/SecurityCenter';
 import Approvals from './pages/Approvals';
 import KnowledgeBase from './pages/Knowledge/index';
 import Workspace from './pages/Workspace/index';
@@ -80,6 +81,7 @@ function AppRoutes() {
       <Route path="/usage" element={user && user.role !== 'employee' ? <Layout><Usage /></Layout> : <Navigate to="/login" replace />} />
       <Route path="/playground" element={user && user.role !== 'employee' ? <Layout><Playground /></Layout> : <Navigate to="/login" replace />} />
       <Route path="/approvals" element={user && user.role !== 'employee' ? <Layout><Approvals /></Layout> : <Navigate to="/login" replace />} />
+      <Route path="/security" element={user && user.role === 'admin' ? <Layout><SecurityCenter /></Layout> : <Navigate to="/login" replace />} />
       <Route path="/settings" element={user && user.role === 'admin' ? <Layout><Settings /></Layout> : <Navigate to="/login" replace />} />
 
       {/* Catch-all */}

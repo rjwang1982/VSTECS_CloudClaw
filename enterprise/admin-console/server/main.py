@@ -3612,6 +3612,317 @@ def admin_ai_clear(authorization: str = Header(default="")):
 
 
 # =========================================================================
+# Security Center — SOUL, Tools, Runtimes, Infrastructure
+# =========================================================================
+
+@app.get("/api/v1/security/global-soul")
+def get_global_soul(authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    try:
+        bucket = s3ops.bucket()
+        key = "_shared/soul/global/SOUL.md"
+        body = s3ops._client().get_object(Bucket=bucket, Key=key)["Body"].read().decode()
+        return {"content": body, "key": key}
+    except Exception as e:
+        return {"content": "", "key": "_shared/soul/global/SOUL.md", "error": str(e)}
+
+@app.put("/api/v1/security/global-soul")
+def put_global_soul(body: dict, authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    bucket = s3ops.bucket()
+    s3ops._client().put_object(Bucket=bucket, Key="_shared/soul/global/SOUL.md",
+                               Body=body.get("content", "").encode(), ContentType="text/markdown")
+    return {"saved": True}
+
+@app.get("/api/v1/security/positions/{pos_id}/soul")
+def get_position_soul(pos_id: str, authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    try:
+        bucket = s3ops.bucket()
+        key = f"_shared/soul/positions/{pos_id}/SOUL.md"
+        body = s3ops._client().get_object(Bucket=bucket, Key=key)["Body"].read().decode()
+        return {"content": body, "key": key}
+    except Exception as e:
+        return {"content": "", "key": f"_shared/soul/positions/{pos_id}/SOUL.md", "error": str(e)}
+
+@app.put("/api/v1/security/positions/{pos_id}/soul")
+def put_position_soul(pos_id: str, body: dict, authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    bucket = s3ops.bucket()
+    s3ops._client().put_object(Bucket=bucket, Key=f"_shared/soul/positions/{pos_id}/SOUL.md",
+                               Body=body.get("content", "").encode(), ContentType="text/markdown")
+    return {"saved": True}
+
+@app.get("/api/v1/security/positions/{pos_id}/tools")
+def get_position_tools(pos_id: str, authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    # Read all employees in this position and return their permissions, or return position-default
+    try:
+        stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+        ssm = _ssm_client()
+        # Check if there's a position-level default stored in SSM
+        try:
+            resp = ssm.get_parameter(Name=f"/openclaw/{stack}/positions/{pos_id}/tools")
+            return json.loads(resp["Parameter"]["Value"])
+        except Exception:
+            pass
+        # Fallback: infer from employees
+        emps = db.get_employees()
+        pos_emps = [e for e in emps if e.get("positionId") == pos_id]
+        for emp in pos_emps[:1]:
+            try:
+                p = ssm.get_parameter(Name=f"/openclaw/{stack}/tenants/{emp['id']}/permissions")
+                data = json.loads(p["Parameter"]["Value"])
+                return {"profile": data.get("profile", "basic"), "tools": data.get("tools", [])}
+            except Exception:
+                pass
+        return {"profile": "basic", "tools": ["web_search"]}
+    except Exception as e:
+        return {"profile": "basic", "tools": ["web_search"], "error": str(e)}
+
+@app.put("/api/v1/security/positions/{pos_id}/tools")
+def put_position_tools(pos_id: str, body: dict, authorization: str = Header(default="")):
+    """Write tool permissions for ALL employees in this position."""
+    _require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    ssm = _ssm_client()
+    profile = {"profile": body.get("profile", "custom"), "tools": body.get("tools", []),
+               "role": body.get("profile", "custom"),
+               "data_permissions": {"file_paths": [], "api_endpoints": []}}
+    value = json.dumps(profile)
+    # Write position-level default
+    try:
+        ssm.put_parameter(Name=f"/openclaw/{stack}/positions/{pos_id}/tools",
+                          Value=value, Type="String", Overwrite=True)
+    except Exception as e:
+        print(f"[security] position tools write failed: {e}")
+    # Also propagate to all employees in this position
+    emps = db.get_employees()
+    for emp in emps:
+        if emp.get("positionId") == pos_id:
+            try:
+                # Use us-east-1 — where agent container reads
+                import boto3 as _b3_t
+                ssm_e1 = _b3_t.client("ssm", region_name="us-east-1")
+                ssm_e1.put_parameter(Name=f"/openclaw/{stack}/tenants/{emp['id']}/permissions",
+                                     Value=value, Type="String", Overwrite=True)
+            except Exception as e2:
+                print(f"[security] emp {emp['id']} tools write failed: {e2}")
+    return {"saved": True, "propagated": len([e for e in emps if e.get("positionId") == pos_id])}
+
+@app.get("/api/v1/security/runtimes")
+def get_security_runtimes(authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    try:
+        import boto3 as _b3r
+        ac = _b3r.client("bedrock-agentcore-control", region_name="us-east-1")
+        resp = ac.list_agent_runtimes()
+        result = []
+        for rt in resp.get("agentRuntimes", []):
+            rt_id = rt.get("agentRuntimeId", "")
+            try:
+                detail = ac.get_agent_runtime(agentRuntimeId=rt_id)
+                artifact = detail.get("agentRuntimeArtifact", {}).get("containerConfiguration", {})
+                env = detail.get("environmentVariables", {})
+                lc = detail.get("lifecycleConfiguration", {})
+                result.append({
+                    "id": rt_id,
+                    "name": detail.get("agentRuntimeName", rt_id),
+                    "status": detail.get("status", "UNKNOWN"),
+                    "containerUri": artifact.get("containerUri", ""),
+                    "roleArn": detail.get("roleArn", ""),
+                    "model": env.get("BEDROCK_MODEL_ID", ""),
+                    "region": env.get("AWS_REGION", "us-east-1"),
+                    "idleTimeoutSec": lc.get("idleRuntimeSessionTimeout", 900),
+                    "maxLifetimeSec": lc.get("maxLifetime", 28800),
+                    "createdAt": detail.get("createdAt", "").isoformat() if hasattr(detail.get("createdAt", ""), "isoformat") else str(detail.get("createdAt", "")),
+                    "version": detail.get("agentRuntimeVersion", "1"),
+                })
+            except Exception:
+                result.append({"id": rt_id, "name": rt.get("agentRuntimeName", rt_id), "status": rt.get("status", "UNKNOWN")})
+        return {"runtimes": result}
+    except Exception as e:
+        return {"runtimes": [], "error": str(e)}
+
+@app.put("/api/v1/security/runtimes/{runtime_id}/lifecycle")
+def update_runtime_lifecycle(runtime_id: str, body: dict, authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    try:
+        import boto3 as _b3r2
+        ac = _b3r2.client("bedrock-agentcore-control", region_name="us-east-1")
+        detail = ac.get_agent_runtime(agentRuntimeId=runtime_id)
+        ac.update_agent_runtime(
+            agentRuntimeId=runtime_id,
+            agentRuntimeArtifact=detail["agentRuntimeArtifact"],
+            roleArn=detail["roleArn"],
+            networkConfiguration=detail["networkConfiguration"],
+            lifecycleConfiguration={
+                "idleRuntimeSessionTimeout": body.get("idleTimeoutSec", 900),
+                "maxLifetime": body.get("maxLifetimeSec", 28800),
+            },
+        )
+        return {"saved": True}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@app.get("/api/v1/security/infrastructure")
+def get_infrastructure(authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    import boto3 as _b3i
+    result = {"iamRoles": [], "ecrImages": [], "securityGroups": []}
+    # IAM Roles — filter to agentcore
+    try:
+        iam = _b3i.client("iam")
+        paginator = iam.get_paginator("list_roles")
+        for page in paginator.paginate():
+            for r in page["Roles"]:
+                if "agentcore" in r["RoleName"].lower() or "openclaw" in r["RoleName"].lower():
+                    result["iamRoles"].append({
+                        "name": r["RoleName"], "arn": r["Arn"],
+                        "created": r["CreateDate"].isoformat() if hasattr(r["CreateDate"], "isoformat") else str(r["CreateDate"]),
+                    })
+    except Exception as e:
+        result["iamRoles"] = [{"error": str(e)}]
+    # ECR images
+    try:
+        ecr = _b3i.client("ecr", region_name="us-east-1")
+        repos = ecr.describe_repositories().get("repositories", [])
+        for repo in repos:
+            if "openclaw" in repo["repositoryName"] or "multitenancy" in repo["repositoryName"]:
+                try:
+                    imgs = ecr.describe_images(repositoryName=repo["repositoryName"],
+                                               filter={"tagStatus": "TAGGED"}).get("imageDetails", [])
+                    for img in imgs[:3]:
+                        result["ecrImages"].append({
+                            "repo": repo["repositoryName"],
+                            "tag": (img.get("imageTags") or ["latest"])[0],
+                            "digest": img.get("imageDigest", "")[:19] + "…",
+                            "sizeBytes": img.get("imageSizeInBytes", 0),
+                            "pushedAt": img.get("imagePushedAt", "").isoformat() if hasattr(img.get("imagePushedAt", ""), "isoformat") else "",
+                        })
+                except Exception:
+                    pass
+    except Exception as e:
+        result["ecrImages"] = [{"error": str(e)}]
+    # VPC security groups
+    try:
+        ec2 = _b3i.client("ec2", region_name="us-east-1")
+        sgs = ec2.describe_security_groups(Filters=[{"Name": "group-name", "Values": ["*agentcore*", "*openclaw*"]}]).get("SecurityGroups", [])
+        for sg in sgs:
+            result["securityGroups"].append({
+                "id": sg["GroupId"], "name": sg["GroupName"],
+                "description": sg["Description"], "vpcId": sg.get("VpcId", ""),
+            })
+    except Exception as e:
+        result["securityGroups"] = [{"error": str(e)}]
+    return result
+
+# =========================================================================
+# Settings — Admin Account, Admin Assistant, System Stats
+# =========================================================================
+
+@app.put("/api/v1/settings/admin-password")
+def change_admin_password(body: dict, authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    new_pw = body.get("newPassword", "")
+    if len(new_pw) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters")
+    try:
+        stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+        import boto3 as _b3pw
+        _b3pw.client("ssm", region_name="us-east-1").put_parameter(
+            Name=f"/openclaw/{stack}/admin-password",
+            Value=new_pw, Type="SecureString", Overwrite=True)
+        os.environ["ADMIN_PASSWORD"] = new_pw
+        return {"saved": True}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@app.get("/api/v1/settings/admin-assistant")
+def get_admin_assistant(authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    try:
+        cfg = db.get_config("admin-assistant") or {}
+    except Exception:
+        cfg = {}
+    return {
+        "model": cfg.get("model", os.environ.get("BEDROCK_MODEL_ID", "global.amazon.nova-2-lite-v1:0")),
+        "allowedCommands": cfg.get("allowedCommands", ["list_employees", "list_agents", "get_agent", "list_sessions", "list_audit", "list_approvals", "approve_request", "deny_request", "get_service_status", "get_model_config", "update_model_config"]),
+        "systemPromptExtra": cfg.get("systemPromptExtra", ""),
+    }
+
+@app.put("/api/v1/settings/admin-assistant")
+def put_admin_assistant(body: dict, authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    cfg = {
+        "model": body.get("model", ""),
+        "allowedCommands": body.get("allowedCommands", []),
+        "systemPromptExtra": body.get("systemPromptExtra", ""),
+    }
+    db.set_config("admin-assistant", cfg)
+    return {"saved": True}
+
+@app.get("/api/v1/settings/system-stats")
+def get_system_stats(authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    import shutil, subprocess
+    result = {}
+    # Disk
+    try:
+        disk = shutil.disk_usage("/")
+        result["disk"] = {"total": disk.total, "used": disk.used, "free": disk.free,
+                          "pct": round(disk.used / disk.total * 100, 1)}
+    except Exception:
+        result["disk"] = {}
+    # CPU / Memory via /proc (no psutil needed)
+    try:
+        with open("/proc/meminfo") as f:
+            mem_lines = {l.split(":")[0]: int(l.split(":")[1].strip().split()[0])
+                         for l in f if ":" in l}
+        mem_total = mem_lines.get("MemTotal", 0) * 1024
+        mem_free = (mem_lines.get("MemAvailable", 0)) * 1024
+        result["memory"] = {"total": mem_total, "used": mem_total - mem_free, "free": mem_free,
+                             "pct": round((mem_total - mem_free) / max(mem_total, 1) * 100, 1)}
+    except Exception:
+        result["memory"] = {}
+    try:
+        cpu_out = subprocess.check_output(["top", "-bn1"], text=True, timeout=5)
+        for line in cpu_out.splitlines():
+            if "Cpu" in line or "cpu" in line:
+                parts = line.replace(",", " ").split()
+                for i, p in enumerate(parts):
+                    if "id" in p.lower() and i > 0:
+                        try:
+                            idle = float(parts[i - 1].replace("%", ""))
+                            result["cpu"] = {"pct": round(100 - idle, 1)}
+                            break
+                        except Exception:
+                            pass
+                break
+    except Exception:
+        result["cpu"] = {"pct": 0}
+    # Port status
+    try:
+        ports_out = subprocess.check_output(["ss", "-tlnp"], text=True, timeout=5)
+        listening = set()
+        for line in ports_out.splitlines():
+            if "LISTEN" in line:
+                m = __import__("re").search(r":(\d+)\s", line)
+                if m:
+                    listening.add(int(m.group(1)))
+        key_ports = [
+            {"port": 8099, "name": "Admin Console", "expected": True},
+            {"port": 8090, "name": "Tenant Router", "expected": True},
+            {"port": 8091, "name": "H2 Proxy", "expected": True},
+            {"port": 18789, "name": "OpenClaw Gateway", "expected": False},
+        ]
+        result["ports"] = [{"port": p["port"], "name": p["name"], "listening": p["port"] in listening} for p in key_ports]
+    except Exception:
+        result["ports"] = []
+    return result
+
+
+# =========================================================================
 # Startup
 # =========================================================================
 

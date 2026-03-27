@@ -2,7 +2,7 @@ import { ReactNode, useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, Building2, Users, Bot, Puzzle, Activity,
-  Shield, DollarSign, Gamepad2, Settings, ChevronDown, ChevronRight,
+  ShieldCheck, Shield, DollarSign, Gamepad2, Settings, ChevronDown, ChevronRight,
   Bell, Search, Menu, X, CheckCircle, LogOut, User, FolderOpen, BookOpen,
   Sun, Moon, MessageSquare,
 } from 'lucide-react';
@@ -38,6 +38,7 @@ const ADMIN_NAV: NavItem[] = [
   { label: 'Skill Market', href: '/skills', icon: <Puzzle size={20} /> },
   { label: 'Knowledge Base', href: '/knowledge', icon: <BookOpen size={20} /> },
   { label: 'IM Channels', href: '/channels', icon: <MessageSquare size={20} /> },
+  { label: 'Security Center', href: '/security', icon: <ShieldCheck size={20} /> },
   { label: 'Monitor', href: '/monitor', icon: <Activity size={20} /> },
   { label: 'Audit Center', href: '/audit', icon: <Shield size={20} /> },
   { label: 'Approvals', href: '/approvals', icon: <CheckCircle size={20} /> },

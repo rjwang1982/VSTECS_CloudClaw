@@ -583,3 +583,127 @@ export function useApprovePairing() {
     },
   });
 }
+
+// =========================================================================
+// Security Center
+// =========================================================================
+
+export function useGlobalSoul() {
+  return useQuery<{ content: string; key: string }>({
+    queryKey: ['security-global-soul'],
+    queryFn: () => api.get('/security/global-soul'),
+  });
+}
+
+export function useUpdateGlobalSoul() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (content: string) => api.put('/security/global-soul', { content }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['security-global-soul'] }),
+  });
+}
+
+export function usePositionSoul(posId: string) {
+  return useQuery<{ content: string; key: string }>({
+    queryKey: ['security-position-soul', posId],
+    queryFn: () => api.get(`/security/positions/${posId}/soul`),
+    enabled: !!posId,
+  });
+}
+
+export function useUpdatePositionSoul() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ posId, content }: { posId: string; content: string }) =>
+      api.put(`/security/positions/${posId}/soul`, { content }),
+    onSuccess: (_d, v) => qc.invalidateQueries({ queryKey: ['security-position-soul', v.posId] }),
+  });
+}
+
+export function usePositionTools(posId: string) {
+  return useQuery<{ profile: string; tools: string[] }>({
+    queryKey: ['security-position-tools', posId],
+    queryFn: () => api.get(`/security/positions/${posId}/tools`),
+    enabled: !!posId,
+  });
+}
+
+export function useUpdatePositionTools() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ posId, profile, tools }: { posId: string; profile: string; tools: string[] }) =>
+      api.put(`/security/positions/${posId}/tools`, { profile, tools }),
+    onSuccess: (_d, v) => qc.invalidateQueries({ queryKey: ['security-position-tools', v.posId] }),
+  });
+}
+
+export interface SecurityRuntime {
+  id: string; name: string; status: string;
+  containerUri: string; roleArn: string; model: string;
+  idleTimeoutSec: number; maxLifetimeSec: number;
+  createdAt: string; version: string;
+}
+
+export function useSecurityRuntimes() {
+  return useQuery<{ runtimes: SecurityRuntime[]; error?: string }>({
+    queryKey: ['security-runtimes'],
+    queryFn: () => api.get('/security/runtimes'),
+    staleTime: 30_000,
+  });
+}
+
+export function useUpdateRuntimeLifecycle() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ runtimeId, idleTimeoutSec, maxLifetimeSec }: { runtimeId: string; idleTimeoutSec: number; maxLifetimeSec: number }) =>
+      api.put(`/security/runtimes/${runtimeId}/lifecycle`, { idleTimeoutSec, maxLifetimeSec }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['security-runtimes'] }),
+  });
+}
+
+export function useInfrastructure() {
+  return useQuery<{ iamRoles: any[]; ecrImages: any[]; securityGroups: any[] }>({
+    queryKey: ['security-infrastructure'],
+    queryFn: () => api.get('/security/infrastructure'),
+    staleTime: 60_000,
+  });
+}
+
+// =========================================================================
+// Settings — Admin Account, Admin Assistant, System Stats
+// =========================================================================
+
+export function useChangeAdminPassword() {
+  return useMutation({
+    mutationFn: (newPassword: string) => api.put('/settings/admin-password', { newPassword }),
+  });
+}
+
+export function useAdminAssistant() {
+  return useQuery<{ model: string; allowedCommands: string[]; systemPromptExtra: string }>({
+    queryKey: ['admin-assistant-config'],
+    queryFn: () => api.get('/settings/admin-assistant'),
+  });
+}
+
+export function useUpdateAdminAssistant() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { model: string; allowedCommands: string[]; systemPromptExtra: string }) =>
+      api.put('/settings/admin-assistant', data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin-assistant-config'] }),
+  });
+}
+
+export function useSystemStats() {
+  return useQuery<{
+    cpu: { pct: number };
+    memory: { total: number; used: number; free: number; pct: number };
+    disk: { total: number; used: number; free: number; pct: number };
+    ports: { port: number; name: string; listening: boolean }[];
+  }>({
+    queryKey: ['system-stats'],
+    queryFn: () => api.get('/settings/system-stats'),
+    refetchInterval: 10_000,
+  });
+}
