@@ -598,29 +598,26 @@ def _ensure_workspace_assembled(tenant_id: str) -> None:
                             # Build KB block with specific proactive instructions
                             kb_lines_text = "\n".join(kb_soul_lines)
                             # For org-directory KB: inline the content directly into SOUL.md
-                            # so the agent doesn't need to proactively read the file.
+                            # Read from S3 (reliable — no EFS path timing issues).
                             org_dir_inline = ""
-                            for line in kb_soul_lines:
-                                if "org-directory" not in line and "Company Directory" not in line:
-                                    continue
-                                # Extract the directory path from the kb_soul_lines entry
-                                kb_path = line.split(": ", 1)[1].rstrip().rstrip("/") if ": " in line else ""
-                                if kb_path:
-                                    dir_file = os.path.join(kb_path, "company-directory.md")
-                                    if os.path.isfile(dir_file):
-                                        try:
-                                            with open(dir_file) as f:
-                                                dir_content = f.read()
-                                            org_dir_inline = (
-                                                "\n\n<!-- COMPANY DIRECTORY (inline) -->\n"
-                                                "The following is the complete ACME Corp employee directory. "
-                                                "Use this to answer any question about colleagues, contacts, "
-                                                "departments, or who to reach for any topic:\n\n"
-                                                + dir_content
-                                            )
-                                        except Exception:
-                                            pass
-                                break
+                            if any("org-directory" in line or "Company Directory" in line
+                                   for line in kb_soul_lines):
+                                try:
+                                    org_obj = s3_kb.get_object(
+                                        Bucket=S3_BUCKET,
+                                        Key="_shared/knowledge/org-directory/company-directory.md"
+                                    )
+                                    dir_content = org_obj["Body"].read().decode("utf-8")
+                                    org_dir_inline = (
+                                        "\n\n<!-- COMPANY DIRECTORY (inline) -->\n"
+                                        "The following is the complete ACME Corp employee directory. "
+                                        "Use this to answer any question about colleagues, contacts, "
+                                        "departments, or who to reach for any topic:\n\n"
+                                        + dir_content
+                                    )
+                                    logger.info("Org directory inlined into SOUL.md (%d chars)", len(dir_content))
+                                except Exception as e:
+                                    logger.warning("Org directory inline failed: %s", e)
                             kb_block = (
                                 "\n\n<!-- KNOWLEDGE BASES -->\n"
                                 "You have access to the following knowledge base documents:\n"
