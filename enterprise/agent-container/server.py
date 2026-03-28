@@ -635,6 +635,24 @@ def _ensure_workspace_assembled(tenant_id: str) -> None:
         # It runs both at container startup (entrypoint.sh bg worker) and here on
         # first request, so always-on containers have it before the first message.
 
+        # In EFS mode, the OpenClaw Gateway (started at container boot) reads SOUL.md
+        # from its default workspace path: HOME/.openclaw/workspace/ (= /.openclaw/workspace/).
+        # OPENCLAW_WORKSPACE points to the EFS path, but the Gateway may have cached its
+        # workspace from startup (before the EFS was populated). Mirror the assembled
+        # SOUL.md to the Gateway's default workspace so it always has the latest version.
+        default_workspace = os.path.expanduser("~/.openclaw/workspace")
+        if default_workspace != WORKSPACE:
+            try:
+                import shutil
+                os.makedirs(default_workspace, exist_ok=True)
+                for fname in ["SOUL.md", "AGENTS.md", "TOOLS.md", "IDENTITY.md", "CHANNELS.md"]:
+                    src = os.path.join(WORKSPACE, fname)
+                    if os.path.isfile(src):
+                        shutil.copy2(src, os.path.join(default_workspace, fname))
+                logger.info("Mirrored workspace files to Gateway default path: %s", default_workspace)
+            except Exception as e:
+                logger.warning("Gateway workspace mirror failed (non-fatal): %s", e)
+
         _assembled_tenants.add(tenant_id)
         logger.info("Workspace ready for tenant %s", tenant_id)
 
