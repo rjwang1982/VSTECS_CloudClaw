@@ -149,17 +149,27 @@ def assemble_workspace(
         logger.info("Position layer (%s): SOUL=%d AGENTS=%d chars",
                     pos_id, len(position_soul), len(position_agents))
 
-    # 4. Read personal layer (already in workspace from s3 sync)
+    # 4. Read personal layer (employee's own preferences only).
+    # Use .personal_soul_backup.md if it exists — this is the employee's raw personal
+    # layer, saved before the first assembly. Without this, subsequent assemblies would
+    # read the already-merged SOUL.md (which includes global + position + KB blocks)
+    # as the personal layer, causing a snowball: SOUL.md grows unboundedly across sessions.
     personal_soul_path = os.path.join(workspace, "SOUL.md")
+    backup_path = os.path.join(workspace, ".personal_soul_backup.md")
     personal_soul = ""
-    if os.path.isfile(personal_soul_path):
+
+    if os.path.isfile(backup_path):
+        # Backup exists = workspace has been assembled before; use the original personal layer
+        with open(backup_path) as f:
+            personal_soul = f.read()
+        logger.info("Personal layer (from backup): SOUL=%d chars", len(personal_soul))
+    elif os.path.isfile(personal_soul_path):
         with open(personal_soul_path) as f:
             personal_soul = f.read()
-        # Back up personal SOUL before overwriting with merged version
-        backup_path = os.path.join(workspace, ".personal_soul_backup.md")
+        # Save backup so future assemblies use the original personal preferences
         with open(backup_path, "w") as f:
             f.write(personal_soul)
-        logger.info("Personal layer: SOUL=%d chars (backed up)", len(personal_soul))
+        logger.info("Personal layer: SOUL=%d chars (backup created)", len(personal_soul))
 
     # 5. Merge and write
     merged_soul = merge_soul(global_soul, position_soul, personal_soul)
