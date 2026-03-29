@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { User, Bot, Save, Brain, Eye, EyeOff, ChevronDown, ChevronRight, Share2, Copy, Check, ExternalLink } from 'lucide-react';
+import { User, Bot, Save, Brain, Eye, EyeOff, ChevronDown, ChevronRight, Share2, Copy, Check, ExternalLink, Zap, Radio } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import { api } from '../../api/client';
 import { Badge, Button, Card, StatusDot } from '../../components/ui';
@@ -98,6 +98,24 @@ export default function PortalProfile() {
               <Bot size={14} className="text-green-400" />
               <span className="text-sm font-medium">{profile?.agent?.name || 'Not assigned'}</span>
               {profile?.agent && <StatusDot status={profile.agent.status} />}
+            </div>
+          </div>
+          <div>
+            <p className="text-xs text-text-muted">Mode</p>
+            <div className="flex items-center gap-1.5 mt-0.5">
+              {profile?.deployMode === 'always-on-ecs' ? (
+                <>
+                  <Zap size={13} className="text-primary" />
+                  <span className="text-sm font-medium text-primary">Always-on</span>
+                  <span className="text-[10px] text-text-muted">0ms · scheduled tasks</span>
+                </>
+              ) : (
+                <>
+                  <Radio size={13} className="text-text-muted" />
+                  <span className="text-sm font-medium text-text-secondary">On-demand</span>
+                  <span className="text-[10px] text-text-muted">~6s cold start</span>
+                </>
+              )}
             </div>
           </div>
         </div>

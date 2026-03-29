@@ -1961,13 +1961,29 @@ def portal_profile(authorization: str = Header(default="")):
     # Return first 2KB of MEMORY.md so portal can show "what agent remembers"
     memory_preview = memory_md[:2048] if memory_md else None
 
-    # Check if employee has always-on container running
+    # Determine deployment mode and IM connection info
     stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
     is_always_on = False
+    deploy_mode = agent.get("deployMode", "serverless") if agent else "serverless"
+    always_on_agent_id = None
+    dedicated_bot_info = {}
+
     try:
         ssm_ao = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
-        ssm_ao.get_parameter(Name=f"/openclaw/{stack}/tenants/{user.employee_id}/always-on-agent")
+        param = ssm_ao.get_parameter(
+            Name=f"/openclaw/{stack}/tenants/{user.employee_id}/always-on-agent")
+        always_on_agent_id = param["Parameter"]["Value"]
         is_always_on = True
+        deploy_mode = "always-on-ecs"
+
+        # Check if dedicated IM bots are configured (Plan A direct IM)
+        for ch, key in [("telegram", "telegram-token"), ("discord", "discord-token")]:
+            try:
+                ssm_ao.get_parameter(
+                    Name=f"/openclaw/{stack}/always-on/{always_on_agent_id}/{key}")
+                dedicated_bot_info[ch] = "configured"
+            except Exception:
+                dedicated_bot_info[ch] = "not_configured"
     except Exception:
         pass
 
@@ -1979,6 +1995,13 @@ def portal_profile(authorization: str = Header(default="")):
         "dailyMemoryCount": len(s3ops.list_files(f"{user.employee_id}/workspace/memory/")),
         "memoryPreview": memory_preview,
         "isAlwaysOn": is_always_on,
+        "deployMode": deploy_mode,            # "serverless" | "always-on-ecs"
+        "alwaysOnAgentId": always_on_agent_id,
+        "dedicatedBots": dedicated_bot_info,  # which channels have dedicated bot tokens
+        "imConnectionMode": (
+            "direct" if is_always_on and any(v == "configured" for v in dedicated_bot_info.values())
+            else "shared-gateway"             # both modes start with shared gateway
+        ),
     }
 
 
@@ -2150,28 +2173,78 @@ def portal_channel_disconnect(channel: str, authorization: str = Header(default=
 
 @app.get("/api/v1/portal/channels")
 def portal_channels(authorization: str = Header(default="")):
-    """Return list of connected IM channels for the current employee.
+    """Return connected IM channels plus mode-aware pairing instructions.
 
-    Primary source: DynamoDB employee record's 'channels' field (set by admin
-    when a pairing is approved or a self-service pairing completes).
-    Fallback: SSM user-mapping scan (slower, catches edge cases).
+    Returns:
+    - connected: list of connected channels
+    - deployMode: "serverless" | "always-on-ecs"
+    - pairingMode: "shared-gateway" | "direct" (direct = dedicated bot per Plan A)
+    - pairingInstructions: per-channel guidance based on deploy mode
     """
     user = _require_auth(authorization)
-    # Primary: read from DynamoDB employee record
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+
+    # Determine deploy mode
+    is_always_on = False
+    always_on_agent_id = None
+    dedicated_bots = {}
+    try:
+        ssm_ch = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+        param = ssm_ch.get_parameter(
+            Name=f"/openclaw/{stack}/tenants/{user.employee_id}/always-on-agent")
+        always_on_agent_id = param["Parameter"]["Value"]
+        is_always_on = True
+        for ch, key in [("telegram", "telegram-token"), ("discord", "discord-token")]:
+            try:
+                ssm_ch.get_parameter(
+                    Name=f"/openclaw/{stack}/always-on/{always_on_agent_id}/{key}")
+                dedicated_bots[ch] = True
+            except Exception:
+                dedicated_bots[ch] = False
+    except Exception:
+        pass
+
+    # Get connected channels
+    connected = []
     try:
         emp = db.get_employee(user.employee_id)
         if emp:
             db_channels = [c for c in emp.get("channels", []) if c not in ("portal",)]
             if db_channels:
-                return {"connected": db_channels}
+                connected = db_channels
     except Exception:
         pass
-    # Fallback: SSM scan
-    connected = []
-    for channel_prefix in ["telegram", "discord", "slack", "whatsapp", "feishu"]:
-        if _list_user_mappings_for_employee(user.employee_id, channel_prefix):
-            connected.append(channel_prefix)
-    return {"connected": connected}
+    if not connected:
+        for channel_prefix in ["telegram", "discord", "slack", "whatsapp", "feishu"]:
+            if _list_user_mappings_for_employee(user.employee_id, channel_prefix):
+                connected.append(channel_prefix)
+
+    # Build pairing instructions based on mode
+    pairing_mode = "direct" if is_always_on and any(dedicated_bots.values()) else "shared-gateway"
+    instructions = {}
+    if pairing_mode == "shared-gateway":
+        instructions = {
+            "telegram": "Scan the QR code or click the link to start a chat with the shared ACME Agent bot. Send /start to complete pairing.",
+            "discord": "Click the invite link to add ACME Agent to your server, then DM the bot and send /start.",
+            "whatsapp": "Scan the QR code with your phone's WhatsApp. The pairing link will expire in 5 minutes.",
+            "mode_note": "You are using the shared organization bot. All employees share the same bot; your agent is identified by your user ID."
+        }
+    else:
+        instructions = {
+            "telegram": "Your agent has a dedicated Telegram bot. Click the link or search for your bot username to start a direct conversation. Send /start to activate.",
+            "discord": "Your agent has a dedicated Discord bot. Use the provided invite link to connect your personal agent.",
+            "whatsapp": "Scan the QR code to connect your personal WhatsApp to your dedicated agent.",
+            "mode_note": "You are using a dedicated personal bot in Always-on mode. Your agent is exclusively yours — messages go directly to your persistent agent, not through a shared gateway.",
+        }
+
+    return {
+        "connected": connected,
+        "deployMode": "always-on-ecs" if is_always_on else "serverless",
+        "pairingMode": pairing_mode,
+        "pairingInstructions": instructions,
+        "dedicatedBots": dedicated_bots,
+        "alwaysOnAgentId": always_on_agent_id,
+    }
 
 
 def _list_user_mappings_for_employee(emp_id: str, channel_prefix: str) -> bool:
@@ -3033,6 +3106,50 @@ def get_agent_quality(agent_id: str, authorization: str = Header(default="")):
     """Get real quality score for an agent calculated from DynamoDB data."""
     _require_auth(authorization)
     return _calculate_agent_quality(agent_id)
+
+
+@app.post("/api/v1/portal/request-always-on")
+def request_always_on(body: dict, authorization: str = Header(default="")):
+    """Employee requests always-on mode for their agent.
+    Creates a pending approval that IT admin can approve/deny."""
+    user = _require_auth(authorization)
+    reason = body.get("reason", "").strip() or "Employee-initiated request"
+
+    # Check not already always-on
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    try:
+        ssm_chk = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+        ssm_chk.get_parameter(
+            Name=f"/openclaw/{stack}/tenants/{user.employee_id}/always-on-agent")
+        raise HTTPException(400, "Already in always-on mode")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    approval_id = f"apr-alwayson-{user.employee_id}"
+    db.create_approval({
+        "id": approval_id,
+        "type": "always_on_request",
+        "requestedBy": user.employee_id,
+        "requestedByName": user.name,
+        "reason": reason,
+        "status": "pending",
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "details": {
+            "employeeId": user.employee_id,
+            "currentMode": "serverless",
+            "requestedMode": "always-on-ecs",
+        }
+    })
+    db.create_audit_entry({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eventType": "always_on_request", "actorId": user.employee_id,
+        "actorName": user.name, "targetType": "agent", "targetId": user.employee_id,
+        "detail": f"Employee requested always-on mode: {reason}", "status": "pending",
+    })
+    return {"requested": True, "approvalId": approval_id,
+            "message": "Request submitted. IT admin will review and activate always-on mode for your agent."}
 
 
 @app.post("/api/v1/portal/feedback")
@@ -5374,6 +5491,150 @@ def get_always_on_tokens(agent_id: str, authorization: str = Header(default=""))
         except Exception:
             result[channel] = "not_configured"
     return result
+
+
+@app.post("/api/v1/admin/always-on/{agent_id}/reload")
+def reload_always_on_agent(agent_id: str, body: dict, authorization: str = Header(default="")):
+    """Reload an always-on container — stops and restarts it so config/SOUL changes take effect.
+    Optionally accepts imageTag to deploy a specific ECR image version."""
+    _require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    bucket = os.environ.get("S3_BUCKET", f"openclaw-tenants-{_GATEWAY_ACCOUNT_ID}")
+    ddb_table = os.environ.get("DYNAMODB_TABLE", "openclaw-enterprise")
+    ddb_region = os.environ.get("DYNAMODB_REGION", "us-east-2")
+    image_tag = body.get("imageTag", "latest")
+
+    agent = db.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(404, "Agent not found")
+
+    ecs_cfg = _get_ecs_config()
+    if not ecs_cfg["subnet_id"] or not ecs_cfg["sg_id"]:
+        raise HTTPException(500, "ECS config missing")
+
+    # Build ECR image URI with optional tag override
+    ecr_image = (
+        f"{_GATEWAY_ACCOUNT_ID}.dkr.ecr.{_GATEWAY_REGION}.amazonaws.com"
+        f"/{stack}-multitenancy-agent:{image_tag}"
+    )
+
+    # Stop existing task
+    try:
+        ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+        old_arn = ssm.get_parameter(
+            Name=f"/openclaw/{stack}/always-on/{agent_id}/task-arn"
+        )["Parameter"]["Value"]
+        import boto3 as _b3rl
+        _b3rl.client("ecs", region_name=_GATEWAY_REGION).stop_task(
+            cluster=ecs_cfg["cluster"], task=old_arn, reason=f"Reload by admin (image={image_tag})")
+    except Exception:
+        pass
+
+    # Resolve bot tokens
+    telegram_token, discord_token = "", ""
+    try:
+        ssm_tok = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+        for ch, key in [("telegram", "telegram-token"), ("discord", "discord-token")]:
+            try:
+                val = ssm_tok.get_parameter(
+                    Name=f"/openclaw/{stack}/always-on/{agent_id}/{key}",
+                    WithDecryption=True)["Parameter"]["Value"]
+                if ch == "telegram": telegram_token = val
+                else: discord_token = val
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Start new task
+    try:
+        import boto3 as _b3rl2
+        ecs = _b3rl2.client("ecs", region_name=_GATEWAY_REGION)
+        resp = ecs.run_task(
+            cluster=ecs_cfg["cluster"],
+            taskDefinition=ecs_cfg["task_def"],
+            launchType="FARGATE",
+            networkConfiguration={"awsvpcConfiguration": {
+                "subnets": [ecs_cfg["subnet_id"]],
+                "securityGroups": [ecs_cfg["sg_id"]],
+                "assignPublicIp": "ENABLED",
+            }},
+            overrides={"containerOverrides": [{
+                "name": "always-on-agent",
+                "image": ecr_image,
+                "environment": [
+                    {"name": "SESSION_ID",         "value": f"shared__{agent_id}"},
+                    {"name": "SHARED_AGENT_ID",    "value": agent_id},
+                    {"name": "S3_BUCKET",          "value": bucket},
+                    {"name": "STACK_NAME",         "value": stack},
+                    {"name": "AWS_REGION",         "value": _GATEWAY_REGION},
+                    {"name": "DYNAMODB_TABLE",     "value": ddb_table},
+                    {"name": "DYNAMODB_REGION",    "value": ddb_region},
+                    {"name": "SYNC_INTERVAL",      "value": "120"},
+                    {"name": "TELEGRAM_BOT_TOKEN", "value": telegram_token},
+                    {"name": "DISCORD_BOT_TOKEN",  "value": discord_token},
+                ],
+            }]},
+            count=1,
+        )
+        failures = resp.get("failures", [])
+        if failures:
+            raise RuntimeError(f"ECS failures: {failures}")
+        task_arn = resp["tasks"][0]["taskArn"]
+    except Exception as e:
+        raise HTTPException(500, f"Reload failed: {e}")
+
+    # Update SSM + DynamoDB
+    ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+    ssm.put_parameter(Name=f"/openclaw/{stack}/always-on/{agent_id}/task-arn",
+                      Value=task_arn, Type="String", Overwrite=True)
+    try:
+        import boto3 as _b3rl3
+        _b3rl3.resource("dynamodb", region_name=ddb_region).Table(ddb_table).update_item(
+            Key={"PK": "ORG#acme", "SK": f"AGENT#{agent_id}"},
+            UpdateExpression="SET deployMode = :m, containerStatus = :s, ecsTaskArn = :t, imageTag = :i",
+            ExpressionAttributeValues={":m": "always-on-ecs", ":s": "reloading",
+                                       ":t": task_arn, ":i": image_tag},
+        )
+    except Exception:
+        pass
+
+    db.create_audit_entry({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eventType": "config_change", "actorId": "admin", "actorName": "Admin",
+        "targetType": "agent", "targetId": agent_id,
+        "detail": f"Container reloaded with image tag '{image_tag}'", "status": "success",
+    })
+    return {"reloaded": True, "agentId": agent_id, "taskArn": task_arn, "imageTag": image_tag,
+            "note": "Container restarting (~30s). New SOUL/config will be active on next message."}
+
+
+@app.get("/api/v1/admin/always-on/{agent_id}/images")
+def list_agent_images(agent_id: str, authorization: str = Header(default="")):
+    """List available ECR image tags for deploying to this always-on agent."""
+    _require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    try:
+        import boto3 as _b3img
+        ecr = _b3img.client("ecr", region_name=_GATEWAY_REGION)
+        # ECR repo name follows the pattern: {stack}-multitenancy-agent
+        repo_name = f"{stack}-multitenancy-agent"
+        resp = ecr.describe_images(
+            repositoryName=repo_name,
+            filter={"tagStatus": "TAGGED"})
+        images = []
+        for img in sorted(resp.get("imageDetails", []),
+                          key=lambda x: x.get("imagePushedAt", ""), reverse=True)[:20]:
+            for tag in (img.get("imageTags") or []):
+                images.append({
+                    "tag": tag,
+                    "digest": img.get("imageDigest", "")[:20],
+                    "pushed": str(img.get("imagePushedAt", ""))[:10],
+                    "sizeMB": round(img.get("imageSizeInBytes", 0) / 1024 / 1024, 1),
+                })
+        return {"images": images, "repositoryName": repo_name}
+    except Exception as e:
+        raise HTTPException(500, f"ECR list failed: {e}")
 
 
 @app.get("/api/v1/admin/always-on/{agent_id}/status")

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { CheckCircle, Loader2, RefreshCw, Link2, ExternalLink, Clock, AlertCircle, UserPlus } from 'lucide-react';
+import { CheckCircle, Loader2, RefreshCw, Link2, ExternalLink, Clock, AlertCircle, UserPlus, Zap, Radio } from 'lucide-react';
 import { Card, Badge, Button } from '../../components/ui';
 import { api } from '../../api/client';
 import { IM_ICONS } from '../../components/IMIcons';
@@ -274,6 +274,7 @@ export default function BindIM() {
   const [connected, setConnected] = useState<string[]>([]);
   const [disconnecting, setDisconnecting] = useState<string | null>(null);
   const [confirmDisconnect, setConfirmDisconnect] = useState<string | null>(null);
+  const [channelInfo, setChannelInfo] = useState<any>(null);
   const connectedRef = useRef<string[]>([]);
 
   const fetchChannels = useCallback(() => {
@@ -282,6 +283,7 @@ export default function BindIM() {
         connectedRef.current = d.connected;
         setConnected(d.connected);
       }
+      setChannelInfo(d);
     }).catch(() => {});
   }, []);
 
@@ -323,6 +325,10 @@ export default function BindIM() {
     </div>
   );
 
+  const deployMode = channelInfo?.deployMode || 'serverless';
+  const pairingMode = channelInfo?.pairingMode || 'shared-gateway';
+  const instructions = channelInfo?.pairingInstructions || {};
+
   return (
     <div className="max-w-2xl mx-auto p-6 space-y-6">
       <div>
@@ -330,6 +336,31 @@ export default function BindIM() {
         <p className="text-sm text-text-muted mt-1">
           Link your messaging apps so your AI Agent can respond directly in your favorite chat.
         </p>
+      </div>
+
+      {/* Mode Banner — different experience for always-on vs serverless */}
+      <div className={`rounded-xl border px-4 py-3 flex items-start gap-3 ${
+        deployMode === 'always-on-ecs'
+          ? 'bg-primary/5 border-primary/20'
+          : 'bg-surface-dim border-dark-border/40'
+      }`}>
+        {deployMode === 'always-on-ecs' ? (
+          <Zap size={16} className="text-primary mt-0.5 flex-shrink-0" />
+        ) : (
+          <Radio size={16} className="text-text-muted mt-0.5 flex-shrink-0" />
+        )}
+        <div>
+          <p className="text-sm font-medium text-text-primary">
+            {deployMode === 'always-on-ecs' ? 'Always-on mode' : 'On-demand mode'}
+          </p>
+          <p className="text-xs text-text-muted mt-0.5">
+            {instructions.mode_note || (
+              deployMode === 'always-on-ecs'
+                ? 'Your agent runs 24/7. IM messages go directly to your dedicated agent container.'
+                : 'Your agent starts on demand. IM messages are routed through the shared org gateway.'
+            )}
+          </p>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -354,7 +385,9 @@ export default function BindIM() {
                     {isComingSoon && <Badge color="info">Coming soon</Badge>}
                     {isNotEnterprise && <Badge color="default">Not for enterprise</Badge>}
                   </div>
-                  <p className="text-xs text-text-muted">{ch.description}</p>
+                  <p className="text-xs text-text-muted">
+                    {instructions[ch.id] || ch.description}
+                  </p>
                 </div>
               </div>
               {ch.available && (
