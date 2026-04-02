@@ -18,35 +18,20 @@ admin-console/node_modules/
 
 # ==================== Non-deployment files ====================
 
-# Reports & screenshots (internal only)
+# Reports, screenshots, internal docs
 report/
 reportppt/
 marketplace/
-VSTECS_CloudClaw_项目总结报告.md
-VSTECS-CloudClaw READMEmdREADME_A.md
-VSTECS-CloudClaw_项目总结报告.md
-SOW_AWS_Marketplace上架工作说明书.md
-VSTECS_CloudClaw_项目总结报告.md
 
-# Root-level screenshots (deployment docs reference images/ instead)
-/screenshot-*.png
-/vstecs-*.png
-
-# Traffic analytics (local only)
+# Traffic analytics
 traffic/
 
-# Kiro specs (development only)
+# Kiro IDE / specs
 .kiro/
 
 # Demo build artifacts
 enterprise/demo/dist/
 
-# Blog (local only)
+# Blog / brand assets (local only)
 enterprise/blog/
-
-# Brand assets (local only)
 enterprise/catnip-mascot/
-
-# Kiro IDE helper
-CLAUDE.md
-QUICK_START_KIRO.md
