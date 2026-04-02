@@ -1149,7 +1149,9 @@ def get_playground_profiles():
 @app.post("/api/v1/playground/send")
 def playground_send(body: PlaygroundMessage):
     """Send message to agent. mode=live routes through real Tenant Router → AgentCore."""
-    profile = PLAYGROUND_PROFILES.get(body.tenant_id, PLAYGROUND_PROFILES["wa__intern_sarah"])
+    profiles = get_playground_profiles()
+    default_profile = {"role": "employee", "tools": ["web_search"], "planA": "ALLOW: web_search.", "planE": "Block PII."}
+    profile = profiles.get(body.tenant_id, default_profile)
 
     # Live mode: route through Tenant Router → AgentCore → OpenClaw
     if body.mode == "live":
@@ -1184,63 +1186,38 @@ def playground_send(body: PlaygroundMessage):
                 "source": "error",
             }
 
-    # Simulate mode: permission-aware canned responses
+    # Simulate mode: permission-aware — blocked tools use canned responses, otherwise call Bedrock
     msg = body.message.lower()
     is_shell = any(w in msg for w in ["shell", "run", "execute", "command", "terminal"])
     is_file = any(w in msg for w in ["file", "write", "save", "create file", "export"])
     is_code = any(w in msg for w in ["code", "compile", "debug", "test"])
-    is_search = any(w in msg for w in ["search", "find", "look up", "google", "research"])
-    is_email = any(w in msg for w in ["email", "send mail", "compose"])
-    is_jira = any(w in msg for w in ["jira", "ticket", "issue", "bug"])
 
-    # Check permission
+    # Check permission — blocked tools return canned denial
     if is_shell and "shell" not in profile["tools"]:
-        response = f"⛔ Permission denied: Your {profile['role']} role does not have access to shell commands. This request has been logged.\n\nYou can submit an approval request if you need temporary access. Would you like me to do that?"
+        response = f"⛔ Permission denied: Your {profile['role']} role does not have access to shell commands."
         plan_e = "⛔ BLOCKED — Plan A denied before execution."
     elif is_file and "file_write" not in profile["tools"] and "file" not in profile["tools"]:
-        response = f"⛔ Permission denied: Your {profile['role']} role does not have file write access. Only read-only file access is available."
+        response = f"⛔ Permission denied: Your {profile['role']} role does not have file write access."
         plan_e = "⛔ BLOCKED — Plan A denied file_write."
     elif is_code and "code_execution" not in profile["tools"]:
         response = f"⛔ Permission denied: Your {profile['role']} role does not have code execution access."
         plan_e = "⛔ BLOCKED — Plan A denied code_execution."
-    elif is_shell:
-        response = "✅ Shell access granted. Running in sandboxed Docker environment.\n\n```\n$ git status\nOn branch main\nYour branch is up to date with 'origin/main'.\n\nChanges not staged for commit:\n  modified:   src/api/handler.py\n  modified:   tests/test_handler.py\n\nno changes added to commit\n```\n\nYou have 2 modified files. Would you like me to show the diff?"
-        plan_e = "✅ PASS — Output scanned. No sensitive data, no credentials detected."
-    elif is_email:
-        if "email-send" in str(profile["tools"]) or profile["role"] in ["sales", "csm", "hr", "management"]:
-            response = "📧 I can help you compose an email. Please provide:\n\n- **To:** recipient email address\n- **Subject:** email subject line\n- **Body:** email content\n\n⚠️ Note: Every email requires your confirmation before sending (Approval Required skill)."
-            plan_e = "✅ PASS — Email skill available, approval-per-use enforced."
-        else:
-            response = f"⛔ Your {profile['role']} role does not have email sending capability. Please contact IT to request access."
-            plan_e = "⛔ BLOCKED — email-send skill not in role allowlist."
-    elif is_jira:
-        if profile["role"] in ["engineering", "product", "management", "qa", "admin"]:
-            response = "🎫 Querying Jira...\n\n| Key | Summary | Status | Assignee | Priority |\n|-----|---------|--------|----------|----------|\n| PROJ-1234 | Fix login timeout | In Progress | Alice Chen | High |\n| PROJ-1235 | Update API docs | Open | Bob Wang | Medium |\n| PROJ-1236 | Add unit tests | In Review | Carol Li | Low |\n\n3 issues found. Would you like details on any of these?"
-            plan_e = "✅ PASS — Jira query returned public project data only."
-        else:
-            response = f"⛔ Your {profile['role']} role does not have Jira access. This skill is restricted to engineering, product, and management roles."
-            plan_e = "⛔ BLOCKED — jira-query skill not in role allowlist."
-    elif is_search:
-        response = "🔍 Searching the web...\n\nHere's what I found:\n\n1. **AWS Well-Architected Framework** — Best practices for building secure, high-performing, resilient, and efficient infrastructure.\n2. **Microservices Design Patterns** — Common patterns for building distributed systems.\n3. **Cost Optimization on AWS** — Strategies to reduce cloud spending by 30-50%.\n\nWould you like me to dive deeper into any of these topics?"
-        plan_e = "✅ PASS — Web search results contain no sensitive data."
-    elif "hello" in msg or "hi" in msg or "hey" in msg:
-        response = f"Hello! I'm your AI assistant running as a **{profile['role']}** role. I have access to these tools: {', '.join(profile['tools'])}.\n\nHow can I help you today? Try asking me to:\n- Search the web for information\n- {'Run shell commands' if 'shell' in profile['tools'] else '(shell access not available for your role)'}\n- {'Query Jira tickets' if profile['role'] in ['engineering','product','admin','qa'] else '(Jira not available for your role)'}"
-        plan_e = "✅ PASS — Greeting response, no tool execution."
-    elif "help" in msg or "what can" in msg or "capabilities" in msg:
-        tools_desc = {
-            "web_search": "🔍 Web Search — search the internet",
-            "shell": "💻 Shell — execute terminal commands (sandboxed)",
-            "browser": "🌐 Browser — navigate web pages",
-            "file": "📁 File — read files",
-            "file_write": "✏️ File Write — create and edit files",
-            "code_execution": "⚡ Code Execution — run code in Docker sandbox",
-        }
-        available = "\n".join(f"  - {tools_desc.get(t, t)}" for t in profile["tools"])
-        response = f"I'm running as **{profile['role']}** role. Here are my capabilities:\n\n**Available tools:**\n{available}\n\n**Skills:** web-search, jina-reader, deep-research" + (", jira-query, github-pr" if profile["role"] in ["engineering","admin"] else "") + "\n\nWhat would you like me to do?"
-        plan_e = "✅ PASS — Capability listing, no execution."
     else:
-        response = f"I can help you with that. As a **{profile['role']}** role, I have access to: {', '.join(profile['tools'])}.\n\nCould you be more specific about what you'd like me to do? For example:\n- \"Search for AWS best practices\"\n- \"Run git status\"\n- \"Query Jira ticket PROJ-1234\""
+        # Call Bedrock for real AI response
         plan_e = "✅ PASS — No policy violations."
+        try:
+            import boto3 as _boto3_bedrock
+            bedrock = _boto3_bedrock.client("bedrock-runtime", region_name=os.environ.get("AWS_REGION", "us-east-2"))
+            system_prompt = f"You are an AI assistant for the {profile['role']} role at ACME Corp. You have access to these tools: {', '.join(profile['tools'])}. Be helpful, concise, and professional. Respond in the same language as the user's message."
+            br_response = bedrock.converse(
+                modelId="global.amazon.nova-2-lite-v1:0",
+                messages=[{"role": "user", "content": [{"text": body.message}]}],
+                system=[{"text": system_prompt}],
+                inferenceConfig={"maxTokens": 512, "temperature": 0.7},
+            )
+            response = br_response["output"]["message"]["content"][0]["text"]
+        except Exception as e:
+            response = f"I can help you with that. As a **{profile['role']}** role, I have access to: {', '.join(profile['tools'])}.\n\n(Bedrock unavailable: {e})"
 
     return {
         "response": response,
@@ -1312,23 +1289,47 @@ def portal_chat(body: PortalChatMessage, authorization: str = Header(default="")
     except Exception as e:
         print(f"[portal-chat] Error calling Tenant Router: {e}")
 
-    # Fallback when AgentCore is unreachable
-    # Read employee's workspace to provide context-aware response
-    soul_content = s3ops.read_file(f"_shared/soul/global/SOUL.md") or ""
-    pos_soul = s3ops.read_file(f"_shared/soul/positions/{user.position_id}/SOUL.md") or ""
-    user_md = s3ops.read_file(f"{user.employee_id}/workspace/USER.md") or ""
+    # Fallback: call Bedrock directly when AgentCore is unreachable
+    pos_id = ""
+    positions = db.get_positions()
+    emp = next((e for e in db.get_employees() if e["id"] == user.employee_id), None)
+    if emp:
+        pos_id = emp.get("positionId", "")
+    pos = next((p for p in positions if p["id"] == pos_id), {})
+    role_name = pos.get("name", "Employee")
+    dept_name = emp.get("departmentName", "") if emp else ""
 
-    context_parts = []
-    if pos_soul:
-        context_parts.append(f"[Position SOUL loaded: {len(pos_soul)} chars]")
-    if user_md:
-        context_parts.append(f"[USER.md loaded: {len(user_md)} chars]")
+    try:
+        import boto3 as _boto3_portal
+        bedrock = _boto3_portal.client("bedrock-runtime", region_name=os.environ.get("AWS_REGION", "us-east-2"))
+        system_prompt = f"You are {my_binding.get('agentName', 'an AI assistant')} for {user.name}, a {role_name} in the {dept_name} department at ACME Corp. Be helpful, concise, and professional. Respond in the same language as the user's message."
+        br_response = bedrock.converse(
+            modelId="global.amazon.nova-2-lite-v1:0",
+            messages=[{"role": "user", "content": [{"text": body.message}]}],
+            system=[{"text": system_prompt}],
+            inferenceConfig={"maxTokens": 512, "temperature": 0.7},
+        )
+        reply = br_response["output"]["message"]["content"][0]["text"]
+    except Exception as e:
+        reply = f"I'm your {my_binding.get('agentName', 'AI assistant')}. I'm currently running in offline mode.\n\n(Bedrock error: {e})"
+
+    # Audit trail
+    db.create_audit_entry({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eventType": "agent_invocation",
+        "actorId": user.employee_id,
+        "actorName": user.name,
+        "targetType": "agent",
+        "targetId": my_binding.get("agentId", ""),
+        "detail": f"Portal chat: {body.message[:80]}",
+        "status": "success",
+    })
 
     return {
-        "response": f"I'm your {my_binding.get('agentName', 'AI assistant')}. I'm currently running in offline mode (AgentCore unavailable).\n\n{''.join(context_parts)}\n\nPlease try again later, or use your messaging channel ({my_binding.get('channel', 'Slack')}) for full agent capabilities.",
+        "response": reply,
         "agentId": my_binding.get("agentId"),
         "agentName": my_binding.get("agentName"),
-        "source": "fallback",
+        "source": "bedrock-direct",
     }
 
 
@@ -2258,6 +2259,8 @@ DIST_DIR = Path(__file__).parent.parent / "dist"
 if DIST_DIR.exists():
     # Serve static assets
     app.mount("/assets", StaticFiles(directory=str(DIST_DIR / "assets")), name="assets")
+    if (DIST_DIR / "images").exists():
+        app.mount("/images", StaticFiles(directory=str(DIST_DIR / "images")), name="images")
 
     # SPA fallback: serve index.html for any non-API 404
     from starlette.exceptions import HTTPException as StarletteHTTPException

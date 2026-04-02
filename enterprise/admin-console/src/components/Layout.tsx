@@ -9,7 +9,7 @@ import {
 import { useApprovals, useAlertRules, useAgents, useEmployees } from '../hooks/useApi';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
-import ClawForgeLogo from './ClawForgeLogo';
+import VSTECSLogo from './VSTECSLogo';
 import clsx from 'clsx';
 
 interface NavItem {
@@ -172,20 +172,14 @@ export default function Layout({ children }: { children: ReactNode }) {
       {/* Sidebar */}
       <aside
         className={clsx(
-          'fixed left-0 top-0 z-50 flex h-full flex-col border-r border-dark-border bg-dark-sidebar transition-all duration-300 lg:static',
+          'sidebar-nav fixed left-0 top-0 z-50 flex h-full flex-col border-r border-dark-border bg-dark-sidebar transition-all duration-300 lg:static',
           sidebarOpen ? 'w-64' : 'w-20',
           mobileOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
         )}
       >
         {/* Logo */}
-        <div className="flex h-16 items-center gap-3 border-b border-dark-border px-4">
-          <ClawForgeLogo size={32} animate="idle" />
-          {sidebarOpen && (
-            <div className="overflow-hidden">
-              <div className="text-sm font-semibold text-text-primary truncate">OpenClaw Enterprise</div>
-              <div className="text-[10px] text-text-muted truncate">on AgentCore · aws-samples</div>
-            </div>
-          )}
+        <div className="flex h-16 items-center border-b border-dark-border px-4">
+          <VSTECSLogo variant="horizontal" size={sidebarOpen ? 140 : 32} />
         </div>
 
         {/* Nav */}
@@ -197,6 +191,11 @@ export default function Layout({ children }: { children: ReactNode }) {
 
         {/* Theme toggle + Collapse */}
         <div className="hidden border-t border-dark-border p-3 lg:flex flex-col gap-2">
+          {sidebarOpen && (
+            <div className="px-2 py-1 text-center">
+              <span className="text-[10px] text-text-muted">Powered by OpenClaw on AgentCore</span>
+            </div>
+          )}
           <button
             onClick={toggleTheme}
             className="flex w-full items-center justify-center gap-2 rounded-2xl py-2.5 text-text-muted hover:bg-dark-hover hover:text-text-primary transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)] group"

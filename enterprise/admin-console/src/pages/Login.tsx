@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import { Bot, LogIn, AlertCircle } from 'lucide-react';
-import ClawForgeLogo from '../components/ClawForgeLogo';
+import { LogIn, AlertCircle } from 'lucide-react';
+import VSTECSLogo from '../components/VSTECSLogo';
 
 const DEMO_ACCOUNTS = [
   { id: 'emp-z3', name: 'Zhang San', role: 'Admin', dept: 'Engineering', desc: 'Full platform access' },
@@ -44,9 +44,9 @@ export default function Login() {
       <div className="w-full max-w-md">
         {/* Logo */}
         <div className="text-center mb-8">
-          <div className="inline-flex mb-4"><ClawForgeLogo size={56} animate="idle" /></div>
-          <h1 className="text-2xl font-bold text-text-primary">OpenClaw Enterprise</h1>
-          <p className="text-sm text-text-muted mt-1">on AgentCore · aws-samples</p>
+          <div className="inline-flex mb-4"><VSTECSLogo variant="vertical" size={56} /></div>
+          <h1 className="text-2xl font-bold text-text-primary">VSTECS 智能云 Claw 助手</h1>
+          <p className="text-sm text-text-muted mt-1">引領數字化亞洲 · Enabling Digital Asia</p>
         </div>
 
         {/* Login Form */}
@@ -86,40 +86,17 @@ export default function Login() {
           </div>
         </div>
 
-        {/* Demo Accounts — reference only */}
-        <div className="rounded-xl border border-dark-border bg-dark-card p-6">
-          <h3 className="text-sm font-semibold text-text-muted uppercase tracking-wider mb-3">Demo Accounts</h3>
-          <div className="space-y-2">
-            {DEMO_ACCOUNTS.map(acc => (
-              <div
-                key={acc.id}
-                onClick={() => setEmpId(acc.id)}
-                className="flex items-center gap-3 rounded-lg px-3 py-2.5 hover:bg-dark-hover transition-colors cursor-pointer"
-              >
-                <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-sm font-medium text-white ${
-                  acc.role === 'Admin' ? 'bg-red-500' : acc.role === 'Manager' ? 'bg-amber-500' : 'bg-blue-500'
-                }`}>
-                  {acc.name[0]}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-text-primary">{acc.name}</span>
-                    <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
-                      acc.role === 'Admin' ? 'bg-red-500/10 text-red-400' : acc.role === 'Manager' ? 'bg-amber-500/10 text-amber-400' : 'bg-blue-500/10 text-blue-400'
-                    }`}>{acc.role}</span>
-                  </div>
-                  <p className="text-xs text-text-muted">{acc.id} · {acc.desc}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-          <p className="text-[10px] text-text-muted mt-3 text-center">Click to fill Employee ID. Password required for all accounts.</p>
-        </div>
-
-        {/* Contributor */}
-        <div className="text-center mt-6">
+        {/* Copyright & Legal */}
+        <div className="text-center mt-6 space-y-1">
           <p className="text-xs text-text-muted">
-            Built by <a href="mailto:wjiad@amazon.com" className="text-primary-light hover:underline">wjiad@aws</a> · Contributions welcome
+            © 2025 佳杰科技（上海）有限公司. All rights reserved.
+          </p>
+          <p className="text-xs text-text-muted">
+            <a href="https://www.vstecs.com/" target="_blank" rel="noopener noreferrer" className="text-primary-light hover:underline">vstecs.com</a>
+            {' · '}
+            <a href="/privacy" className="text-primary-light hover:underline">隐私政策</a>
+            {' · '}
+            <a href="/terms" className="text-primary-light hover:underline">服务条款</a>
           </p>
         </div>
       </div>

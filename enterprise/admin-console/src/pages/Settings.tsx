@@ -17,7 +17,10 @@ export default function Settings() {
 
   return (
     <div>
-      <PageHeader title="Settings" description="Platform configuration, model selection, security policies, and service health" />
+      <div className="flex items-center justify-between">
+        <PageHeader title="Settings" description="Platform configuration, model selection, security policies, and service health" />
+        <Badge color="info">v1.0.0</Badge>
+      </div>
 
       <Tabs
         tabs={[

@@ -14,7 +14,7 @@ import type { ChannelType } from '../types';
 // Chart configs
 const areaChartOpts: ApexOptions = {
   chart: { type: 'area', toolbar: { show: false }, sparkline: { enabled: false }, background: 'transparent' },
-  colors: ['#6366f1', '#22c55e'],
+  colors: ['#E8611A', '#22c55e'],
   stroke: { curve: 'smooth', width: 2 },
   fill: { type: 'gradient', gradient: { opacityFrom: 0.3, opacityTo: 0.05 } },
   grid: { borderColor: '#2e3039', strokeDashArray: 4, xaxis: { lines: { show: false } } },
@@ -31,7 +31,7 @@ const areaChartOpts: ApexOptions = {
 
 const donutOptsBase: Omit<ApexOptions, 'labels' | 'plotOptions'> = {
   chart: { type: 'donut', background: 'transparent' },
-  colors: ['#6366f1', '#22c55e', '#f59e0b', '#06b6d4', '#ef4444'],
+  colors: ['#E8611A', '#22c55e', '#f59e0b', '#06b6d4', '#ef4444'],
   stroke: { colors: ['#24262d'], width: 3 },
   legend: { position: 'bottom', labels: { colors: '#94a3b8' } },
   dataLabels: { enabled: false },
@@ -40,7 +40,7 @@ const donutOptsBase: Omit<ApexOptions, 'labels' | 'plotOptions'> = {
 
 const barChartOpts: ApexOptions = {
   chart: { type: 'bar', toolbar: { show: false }, background: 'transparent' },
-  colors: ['#6366f1'],
+  colors: ['#E8611A'],
   plotOptions: { bar: { borderRadius: 4, columnWidth: '50%' } },
   grid: { borderColor: '#2e3039', strokeDashArray: 4 },
   xaxis: {

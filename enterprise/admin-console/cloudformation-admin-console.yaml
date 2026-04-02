@@ -1,0 +1,637 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'VSTECS CloudClaw Enterprise Digital Employee Platform — One-click deployment (EC2 + DynamoDB + S3 + Bedrock)'
+
+# Author: RJ.Wang <wangrenjun@gmail.com>
+# Date: 2026-04-02
+# Version: 2.0.0 — Marketplace-ready
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "基本配置"
+        Parameters:
+          - InstanceType
+          - KeyPairName
+          - AdminPassword
+      - Label:
+          default: "AI 模型"
+        Parameters:
+          - BedrockModel
+      - Label:
+          default: "网络配置"
+        Parameters:
+          - CreateVPCEndpoints
+          - EnablePublicAccess
+      - Label:
+          default: "数据初始化"
+        Parameters:
+          - SeedDemoData
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: "c7g.large"
+    Description: "EC2 实例类型（推荐 Graviton ARM，性价比高 20-40%）"
+    AllowedValues:
+      - "t4g.small"
+      - "t4g.medium"
+      - "t4g.large"
+      - "c7g.large"
+      - "c7g.xlarge"
+
+  KeyPairName:
+    Type: String
+    Default: "none"
+    Description: "EC2 密钥对名称（可选，输入 none 跳过，推荐用 SSM 访问）"
+
+  AdminPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 6
+    Default: "Vstecs@2026"
+    Description: "Admin Console 登录密码（所有演示账号共用）"
+
+  BedrockModel:
+    Type: String
+    Default: "global.amazon.nova-2-lite-v1:0"
+    Description: "默认 AI 模型（Playground 和 Portal Chat 使用）"
+    AllowedValues:
+      - "global.amazon.nova-2-lite-v1:0"
+      - "us.amazon.nova-pro-v1:0"
+      - "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
+      - "us.deepseek.r1-v1:0"
+      - "us.meta.llama3-3-70b-instruct-v1:0"
+
+  CreateVPCEndpoints:
+    Type: String
+    Default: "true"
+    Description: "创建 VPC 端点（SSM + Bedrock 私网访问，更安全但增加 ~$29/月）"
+    AllowedValues:
+      - "true"
+      - "false"
+
+  EnablePublicAccess:
+    Type: String
+    Default: "false"
+    Description: "开放 8099 端口公网访问（方便但安全性降低，推荐用 SSM 端口转发）"
+    AllowedValues:
+      - "true"
+      - "false"
+
+  SeedDemoData:
+    Type: String
+    Default: "true"
+    Description: "初始化演示数据（部门/职位/员工/Agent/Skills，首次部署建议开启）"
+    AllowedValues:
+      - "true"
+      - "false"
+
+  CodePackageS3:
+    Type: String
+    Default: ""
+    Description: "应用代码包 S3 路径（如 s3://bucket/deploy/admin-console.tar.gz）。留空则从 GitHub 克隆"
+
+Conditions:
+  CreateEndpoints: !Equals [!Ref CreateVPCEndpoints, "true"]
+  PublicAccess: !Equals [!Ref EnablePublicAccess, "true"]
+  HasKeyPair: !Not [!Equals [!Ref KeyPairName, "none"]]
+  SeedData: !Equals [!Ref SeedDemoData, "true"]
+  UseS3Code: !Not [!Equals [!Ref CodePackageS3, ""]]
+
+Mappings:
+  RegionAMI:
+    us-east-1:
+      AMI: ami-0a7d5b8a1c5e1b4a2
+    us-east-2:
+      AMI: ami-0823767a63030e222
+    us-west-2:
+      AMI: ami-0b6d6dacf350ebc82
+    eu-west-1:
+      AMI: ami-0d3c8a3e71e2c3f5a
+    ap-northeast-1:
+      AMI: ami-0a1b2c3d4e5f6a7b8
+
+Resources:
+
+  # ==================== Network ====================
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-vpc"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public"
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private"
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Admin Console security group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - !If
+          - HasKeyPair
+          - IpProtocol: tcp
+            FromPort: 22
+            ToPort: 22
+            CidrIp: 127.0.0.1/32
+            Description: "SSH — change CIDR to your IP if needed"
+          - !Ref AWS::NoValue
+        - !If
+          - PublicAccess
+          - IpProtocol: tcp
+            FromPort: 8099
+            ToPort: 8099
+            CidrIp: 0.0.0.0/0
+            Description: "Admin Console public access (optional)"
+          - !Ref AWS::NoValue
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-sg"
+
+  # ==================== VPC Endpoints (Optional) ====================
+  VPCEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateEndpoints
+    Properties:
+      GroupDescription: VPC Endpoint security group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref SecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-vpce-sg"
+
+  SSMEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssm"
+      VpcId: !Ref VPC
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PrivateSubnet]
+      SecurityGroupIds: [!Ref VPCEndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  SSMMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssmmessages"
+      VpcId: !Ref VPC
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PrivateSubnet]
+      SecurityGroupIds: [!Ref VPCEndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  EC2MessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ec2messages"
+      VpcId: !Ref VPC
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PrivateSubnet]
+      SecurityGroupIds: [!Ref VPCEndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  BedrockRuntimeEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.bedrock-runtime"
+      VpcId: !Ref VPC
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PrivateSubnet]
+      SecurityGroupIds: [!Ref VPCEndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  DynamoDBEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.dynamodb"
+      VpcId: !Ref VPC
+      VpcEndpointType: Gateway
+      RouteTableIds: [!Ref PublicRouteTable]
+
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcId: !Ref VPC
+      VpcEndpointType: Gateway
+      RouteTableIds: [!Ref PublicRouteTable]
+
+
+  # ==================== DynamoDB ====================
+  DynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "openclaw-enterprise-${AWS::StackName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-dynamodb"
+
+  # ==================== S3 ====================
+  TenantsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "openclaw-tenants-${AWS::StackName}-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-tenants"
+
+  # ==================== IAM ====================
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-instance-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore'
+        - 'arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy'
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:Query'
+                  - 'dynamodb:Scan'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'dynamodb:BatchWriteItem'
+                Resource:
+                  - !GetAtt DynamoDBTable.Arn
+                  - !Sub "${DynamoDBTable.Arn}/index/*"
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:ListBucket'
+                  - 's3:DeleteObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:ListBucketVersions'
+                Resource:
+                  - !GetAtt TenantsBucket.Arn
+                  - !Sub "${TenantsBucket.Arn}/*"
+                  - 'arn:aws:s3:::openclaw-*'
+                  - 'arn:aws:s3:::openclaw-*/*'
+        - PolicyName: SSMParameterAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ssm:PutParameter'
+                  - 'ssm:GetParameter'
+                  - 'ssm:GetParametersByPath'
+                  - 'ssm:DeleteParameter'
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/*'
+        - PolicyName: STSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'sts:GetCallerIdentity'
+                Resource: '*'
+        - PolicyName: BedrockAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'bedrock:InvokeModel'
+                  - 'bedrock:InvokeModelWithResponseStream'
+                Resource: '*'
+        - PolicyName: CloudFormationSignal
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'cloudformation:SignalResource'
+                Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*'
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-instance-role"
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+
+  # ==================== Wait Condition ====================
+  WaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+  WaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: Instance
+    Properties:
+      Handle: !Ref WaitHandle
+      Timeout: "900"
+      Count: 1
+
+  # ==================== EC2 Instance ====================
+  Instance:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - DynamoDBTable
+      - TenantsBucket
+    Properties:
+      ImageId: !FindInMap [RegionAMI, !Ref "AWS::Region", AMI]
+      InstanceType: !Ref InstanceType
+      KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref "AWS::NoValue"]
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      IamInstanceProfile: !Ref InstanceProfile
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-admin-console"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > /var/log/admin-console-setup.log 2>&1
+          set -ex
+
+          # ---- Environment ----
+          export AWS_REGION=${AWS::Region}
+          export DEBIAN_FRONTEND=noninteractive
+          STACK_NAME="${AWS::StackName}"
+          DYNAMODB_TABLE="openclaw-enterprise-${AWS::StackName}"
+          S3_BUCKET="openclaw-tenants-${AWS::StackName}-${AWS::AccountId}"
+          ADMIN_PASSWORD="${AdminPassword}"
+          BEDROCK_MODEL="${BedrockModel}"
+          SEED_DATA="${SeedDemoData}"
+          WAIT_HANDLE="${WaitHandle}"
+
+          signal_success() {
+            curl -X PUT -H "Content-Type:" \
+              --data-binary '{"Status":"SUCCESS","Reason":"Setup complete","UniqueId":"setup","Data":"OK"}' \
+              "$WAIT_HANDLE"
+          }
+          signal_failure() {
+            curl -X PUT -H "Content-Type:" \
+              --data-binary "{\"Status\":\"FAILURE\",\"Reason\":\"$1\",\"UniqueId\":\"setup\",\"Data\":\"FAILED\"}" \
+              "$WAIT_HANDLE"
+            exit 1
+          }
+
+          # ---- System packages ----
+          apt-get update -y
+          apt-get install -y python3-pip python3-venv git unzip curl jq || signal_failure "apt-get failed"
+
+          # ---- Node.js 22 ----
+          curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+          apt-get install -y nodejs || signal_failure "Node.js install failed"
+
+          # ---- Clone or download code ----
+          cd /home/ubuntu
+          CODE_S3="${CodePackageS3}"
+          if [ -n "$CODE_S3" ]; then
+            # Download from S3 using presigned URL or aws cli
+            mkdir -p app/enterprise/admin-console
+            curl -fsSL -o /tmp/admin-console.tar.gz "$CODE_S3" \
+              || signal_failure "Code download failed"
+            tar xzf /tmp/admin-console.tar.gz -C app/enterprise/admin-console
+            rm -f /tmp/admin-console.tar.gz
+          else
+            # Clone from GitHub (public repo only)
+            git clone --depth 1 https://github.com/jiade-dev/sample-openclaw-on-AWS-with-Bedrock.git app \
+              || signal_failure "git clone failed"
+          fi
+          cd app/enterprise/admin-console
+
+          # ---- Build frontend ----
+          npm install --production=false || signal_failure "npm install failed"
+          npx vite build || signal_failure "vite build failed"
+
+          # ---- Install Python dependencies ----
+          cd server
+          pip3 install --break-system-packages --ignore-installed -r requirements.txt \
+            || signal_failure "pip install failed"
+
+          # ---- Seed DynamoDB demo data ----
+          if [ "$SEED_DATA" = "true" ]; then
+            export DYNAMODB_TABLE
+            python3 seed_dynamodb.py --region $AWS_REGION --table $DYNAMODB_TABLE || true
+            python3 seed_roles.py --region $AWS_REGION --table $DYNAMODB_TABLE 2>/dev/null || true
+            python3 seed_skills_final.py --region $AWS_REGION --table $DYNAMODB_TABLE 2>/dev/null || true
+            python3 seed_audit_approvals.py --region $AWS_REGION --table $DYNAMODB_TABLE || true
+            python3 seed_settings.py --region $AWS_REGION --table $DYNAMODB_TABLE || true
+            python3 seed_knowledge.py --region $AWS_REGION --table $DYNAMODB_TABLE || true
+            python3 seed_usage.py --region $AWS_REGION --table $DYNAMODB_TABLE 2>/dev/null || true
+            python3 seed_workspaces.py --region $AWS_REGION --table $DYNAMODB_TABLE 2>/dev/null || true
+            python3 seed_all_workspaces.py --region $AWS_REGION --table $DYNAMODB_TABLE 2>/dev/null || true
+            python3 seed_routing_conversations.py --region $AWS_REGION --table $DYNAMODB_TABLE 2>/dev/null || true
+            python3 seed_knowledge_docs.py --region $AWS_REGION --table $DYNAMODB_TABLE 2>/dev/null || true
+            python3 seed_ssm_tenants.py --region $AWS_REGION --stack $STACK_NAME 2>/dev/null || true
+          fi
+
+          # ---- Set ownership ----
+          chown -R ubuntu:ubuntu /home/ubuntu/app
+
+          # ---- Systemd service ----
+          tee /etc/systemd/system/openclaw-admin.service > /dev/null <<SVCEOF
+          [Unit]
+          Description=VSTECS CloudClaw Admin Console
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=ubuntu
+          WorkingDirectory=/home/ubuntu/app/enterprise/admin-console/server
+          Environment=AWS_REGION=${AWS::Region}
+          Environment=DYNAMODB_TABLE=openclaw-enterprise-${AWS::StackName}
+          Environment=S3_BUCKET=openclaw-tenants-${AWS::StackName}-${AWS::AccountId}
+          Environment=CONSOLE_PORT=8099
+          Environment=ADMIN_PASSWORD=${AdminPassword}
+          Environment=BEDROCK_MODEL=${BedrockModel}
+          ExecStart=/usr/bin/python3 main.py
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+          SVCEOF
+
+          systemctl daemon-reload
+          systemctl enable openclaw-admin
+          systemctl start openclaw-admin
+
+          # ---- Health check ----
+          sleep 5
+          for i in $(seq 1 12); do
+            if curl -sf http://localhost:8099/api/v1/settings/services > /dev/null 2>&1; then
+              echo "Health check passed on attempt $i"
+              signal_success
+              exit 0
+            fi
+            echo "Waiting for service... attempt $i"
+            sleep 5
+          done
+
+          signal_failure "Service health check failed after 60s"
+
+  # ==================== Outputs ====================
+Outputs:
+  InstanceId:
+    Value: !Ref Instance
+    Description: "EC2 实例 ID"
+
+  PublicIP:
+    Value: !GetAtt Instance.PublicIp
+    Description: "EC2 公网 IP"
+
+  SSMPortForwardCommand:
+    Value: !Sub "aws ssm start-session --target ${Instance} --region ${AWS::Region} --document-name AWS-StartPortForwardingSession --parameters '{\"portNumber\":[\"8099\"],\"localPortNumber\":[\"8099\"]}'"
+    Description: "SSM 端口转发命令（推荐访问方式）"
+
+  AccessURL:
+    Value: !If
+      - PublicAccess
+      - !Sub "http://${Instance.PublicIp}:8099"
+      - "http://localhost:8099 (需先启动 SSM 端口转发)"
+    Description: "Admin Console 访问地址"
+
+  LoginInfo:
+    Value: !Sub "Admin: emp-z3 / ${AdminPassword} | Manager: emp-lin / ${AdminPassword} | Employee: emp-emma / ${AdminPassword}"
+    Description: "登录账号（Admin/Manager/Employee 三种角色）"
+
+  DynamoDBTableName:
+    Value: !Ref DynamoDBTable
+    Description: "DynamoDB 表名"
+
+  S3BucketName:
+    Value: !Ref TenantsBucket
+    Description: "S3 存储桶名"
+
+  BedrockModel:
+    Value: !Ref BedrockModel
+    Description: "AI 模型 ID"
+
+  SetupLog:
+    Value: !Sub "aws ssm start-session --target ${Instance} --region ${AWS::Region} --document-name AWS-StartInteractiveCommand --parameters '{\"command\":[\"tail -f /var/log/admin-console-setup.log\"]}'"
+    Description: "查看部署日志（如果部署超时可用此命令排查）"
+
+  MonthlyCost:
+    Value: !If
+      - CreateEndpoints
+      - "EC2: ~$30-52, EBS: ~$2.40, DynamoDB: <$1, S3: <$1, VPC Endpoints: ~$29. Total: ~$63-85/月"
+      - "EC2: ~$30-52, EBS: ~$2.40, DynamoDB: <$1, S3: <$1. Total: ~$34-56/月"
+    Description: "预估月费（基于 c7g.large 实例）"

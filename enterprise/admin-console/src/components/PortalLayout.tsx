@@ -3,7 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { MessageSquare, User, BarChart3, Puzzle, FileText, LogOut, Sun, Moon } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
-import ClawForgeLogo from './ClawForgeLogo';
+import VSTECSLogo from './VSTECSLogo';
 import clsx from 'clsx';
 
 const NAV = [
@@ -23,14 +23,10 @@ export default function PortalLayout({ children }: { children: ReactNode }) {
   return (
     <div className="flex h-screen overflow-hidden">
       {/* Sidebar */}
-      <aside className="flex w-64 flex-col border-r border-dark-border bg-dark-sidebar">
+      <aside className="sidebar-nav flex w-64 flex-col border-r border-dark-border bg-dark-sidebar">
         {/* Logo */}
-        <div className="flex h-16 items-center gap-3 border-b border-dark-border px-4">
-          <ClawForgeLogo size={32} animate="idle" />
-          <div>
-            <div className="text-sm font-semibold text-text-primary">OpenClaw Portal</div>
-            <div className="text-xs text-text-muted">{user?.name || 'Employee'}</div>
-          </div>
+        <div className="flex h-16 items-center border-b border-dark-border px-4">
+          <VSTECSLogo variant="horizontal" size={140} />
         </div>
 
         {/* Nav */}
@@ -76,7 +72,7 @@ export default function PortalLayout({ children }: { children: ReactNode }) {
               <LogOut size={16} />
             </button>
           </div>
-          <p className="text-[10px] text-text-muted text-center mt-1">wjiad@aws · aws-samples</p>
+          <p className="text-[10px] text-text-muted text-center mt-1">VSTECS · vstecs.com</p>
         </div>
       </aside>
 

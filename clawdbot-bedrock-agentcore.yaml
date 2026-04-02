@@ -276,36 +276,33 @@ Resources:
                   - 'ssm:PutParameter'
                   - 'ssm:GetParameter'
                 Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/${AWS::StackName}/*'
-        - PolicyName: AgentCoreAccessPolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - !If
-                - AgentCoreEnabled
+        - !If
+          - AgentCoreEnabled
+          - PolicyName: AgentCoreAccessPolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
                 - Effect: Allow
                   Action:
                     - 'bedrock-agent-runtime:InvokeAgentRuntime'
                     - 'bedrock-agentcore:GetRuntime'
                     - 'bedrock-agentcore:GetRuntimeEndpoint'
                   Resource: '*'
-                - !Ref AWS::NoValue
-        - PolicyName: ECRAccessPolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - !If
-                - AgentCoreEnabled
+          - !Ref AWS::NoValue
+        - !If
+          - AgentCoreEnabled
+          - PolicyName: ECRAccessPolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
                 - Effect: Allow
                   Action:
                     - 'ecr:GetAuthorizationToken'
                     - 'ecr:BatchCheckLayerAvailability'
                     - 'ecr:GetDownloadUrlForLayer'
                     - 'ecr:BatchGetImage'
-                  Resource: !If
-                    - AgentCoreEnabled
-                    - !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/openclaw-agentcore-agent"
-                    - !Ref AWS::NoValue
-                - !Ref AWS::NoValue
+                  Resource: !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/openclaw-agentcore-agent"
+          - !Ref AWS::NoValue
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-instance-role"

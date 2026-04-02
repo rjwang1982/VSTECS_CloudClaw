@@ -4,7 +4,7 @@ import { ThemeProvider } from './contexts/ThemeContext';
 import Layout from './components/Layout';
 import PortalLayout from './components/PortalLayout';
 
-import ClawForgeLogo from './components/ClawForgeLogo';
+import VSTECSLogo from './components/VSTECSLogo';
 
 // Pages
 import Login from './pages/Login';
@@ -40,7 +40,7 @@ function AppRoutes() {
     return (
       <div className="flex h-screen items-center justify-center bg-dark-bg">
         <div className="text-center">
-          <ClawForgeLogo size={48} animate="working" />
+          <VSTECSLogo variant="vertical" size={48} />
           <p className="text-sm text-text-muted mt-3">Loading...</p>
         </div>
       </div>
