@@ -9,30 +9,42 @@ Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label:
-          default: "基本配置"
+          default: "Instance Configuration"
         Parameters:
+          - ImageId
           - InstanceType
           - KeyPairName
-          - AdminPassword
       - Label:
-          default: "AI 模型"
+          default: "Application Configuration"
         Parameters:
+          - AdminPassword
           - BedrockModel
+          - SeedDemoData
       - Label:
-          default: "网络配置"
+          default: "Network Configuration"
         Parameters:
           - CreateVPCEndpoints
           - EnablePublicAccess
       - Label:
-          default: "数据初始化"
+          default: "Advanced"
         Parameters:
-          - SeedDemoData
+          - CodePackageS3
+    ParameterLabels:
+      ImageId:
+        default: "AMI ID (auto-resolved from SSM)"
+      AdminPassword:
+        default: "Admin Console Password"
 
 Parameters:
+  ImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: "/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id"
+    Description: "Ubuntu 24.04 ARM64 AMI（通过 SSM 公共参数自动获取最新版本）"
+
   InstanceType:
     Type: String
     Default: "c7g.large"
-    Description: "EC2 实例类型（推荐 Graviton ARM，性价比高 20-40%）"
+    Description: "EC2 instance type (Graviton ARM recommended, 20-40% cheaper)"
     AllowedValues:
       - "t4g.small"
       - "t4g.medium"
@@ -43,19 +55,21 @@ Parameters:
   KeyPairName:
     Type: String
     Default: "none"
-    Description: "EC2 密钥对名称（可选，输入 none 跳过，推荐用 SSM 访问）"
+    Description: "EC2 Key Pair name (optional, enter 'none' to skip, SSM access recommended)"
 
   AdminPassword:
     Type: String
     NoEcho: true
-    MinLength: 6
-    Default: "Vstecs@2026"
-    Description: "Admin Console 登录密码（所有演示账号共用）"
+    MinLength: 8
+    MaxLength: 64
+    AllowedPattern: "^(?=.*[a-z])(?=.*[A-Z])(?=.*\\d)(?=.*[@$!%*?&])[A-Za-z\\d@$!%*?&]{8,64}$"
+    ConstraintDescription: "Password must be 8-64 chars with uppercase, lowercase, number, and special character (@$!%*?&)"
+    Description: "Admin Console login password (min 8 chars, must include uppercase, lowercase, number, special char)"
 
   BedrockModel:
     Type: String
     Default: "global.amazon.nova-2-lite-v1:0"
-    Description: "默认 AI 模型（Playground 和 Portal Chat 使用）"
+    Description: "Default AI model for Playground and Portal Chat"
     AllowedValues:
       - "global.amazon.nova-2-lite-v1:0"
       - "us.amazon.nova-pro-v1:0"
@@ -66,7 +80,7 @@ Parameters:
   CreateVPCEndpoints:
     Type: String
     Default: "true"
-    Description: "创建 VPC 端点（SSM + Bedrock 私网访问，更安全但增加 ~$29/月）"
+    Description: "Create VPC Endpoints for SSM + Bedrock private access (more secure, adds ~$29/month)"
     AllowedValues:
       - "true"
       - "false"
@@ -74,7 +88,7 @@ Parameters:
   EnablePublicAccess:
     Type: String
     Default: "false"
-    Description: "开放 8099 端口公网访问（方便但安全性降低，推荐用 SSM 端口转发）"
+    Description: "Open port 8099 for public access (convenient but less secure, SSM port forwarding recommended)"
     AllowedValues:
       - "true"
       - "false"
@@ -82,7 +96,7 @@ Parameters:
   SeedDemoData:
     Type: String
     Default: "true"
-    Description: "初始化演示数据（部门/职位/员工/Agent/Skills，首次部署建议开启）"
+    Description: "Initialize demo data (departments/positions/employees/agents/skills, recommended for first deployment)"
     AllowedValues:
       - "true"
       - "false"
@@ -90,7 +104,7 @@ Parameters:
   CodePackageS3:
     Type: String
     Default: ""
-    Description: "应用代码包 S3 路径（如 s3://bucket/deploy/admin-console.tar.gz）。留空则从 GitHub 克隆"
+    Description: "Application code S3 path (e.g. s3://bucket/deploy/admin-console.tar.gz). Leave empty to clone from GitHub"
 
 Conditions:
   CreateEndpoints: !Equals [!Ref CreateVPCEndpoints, "true"]
@@ -98,19 +112,6 @@ Conditions:
   HasKeyPair: !Not [!Equals [!Ref KeyPairName, "none"]]
   SeedData: !Equals [!Ref SeedDemoData, "true"]
   UseS3Code: !Not [!Equals [!Ref CodePackageS3, ""]]
-
-Mappings:
-  RegionAMI:
-    us-east-1:
-      AMI: ami-0a7d5b8a1c5e1b4a2
-    us-east-2:
-      AMI: ami-0823767a63030e222
-    us-west-2:
-      AMI: ami-0b6d6dacf350ebc82
-    eu-west-1:
-      AMI: ami-0d3c8a3e71e2c3f5a
-    ap-northeast-1:
-      AMI: ami-0a1b2c3d4e5f6a7b8
 
 Resources:
 
@@ -382,8 +383,6 @@ Resources:
                 Resource:
                   - !GetAtt TenantsBucket.Arn
                   - !Sub "${TenantsBucket.Arn}/*"
-                  - 'arn:aws:s3:::openclaw-*'
-                  - 'arn:aws:s3:::openclaw-*/*'
         - PolicyName: SSMParameterAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -448,7 +447,7 @@ Resources:
       - DynamoDBTable
       - TenantsBucket
     Properties:
-      ImageId: !FindInMap [RegionAMI, !Ref "AWS::Region", AMI]
+      ImageId: !Ref ImageId
       InstanceType: !Ref InstanceType
       KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref "AWS::NoValue"]
       SubnetId: !Ref PublicSubnet
