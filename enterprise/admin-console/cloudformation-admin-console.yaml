@@ -512,7 +512,7 @@ Resources:
             rm -f /tmp/admin-console.tar.gz
           else
             # Clone from GitHub (public repo only)
-            git clone --depth 1 https://github.com/jiade-dev/sample-openclaw-on-AWS-with-Bedrock.git app \
+            git clone --depth 1 https://github.com/rjwang1982/VSTECS_CloudClaw.git app \
               || signal_failure "git clone failed"
           fi
           cd app/enterprise/admin-console
