@@ -29,8 +29,8 @@ SOW_AWS_Marketplace上架工作说明书.md
 VSTECS_CloudClaw_项目总结报告.md
 
 # Root-level screenshots (deployment docs reference images/ instead)
-screenshot-*.png
-vstecs-*.png
+/screenshot-*.png
+/vstecs-*.png
 
 # Traffic analytics (local only)
 traffic/
