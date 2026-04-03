@@ -4,7 +4,7 @@ import type { ApexOptions } from 'apexcharts';
 import {
   Building2, Users, Bot, Link2, MessageSquare, Shield,
   TrendingUp, ArrowUpRight, ArrowDownRight, Zap, Activity,
-  DollarSign, Clock, AlertTriangle,
+  DollarSign, Clock, AlertTriangle, CheckCircle2, Circle,
 } from 'lucide-react';
 import { Card, StatCard, Badge, Button, PageHeader } from '../components/ui';
 import { useDepartments, usePositions, useEmployees, useAgents, useSessions, useAuditEntries, useBindings, useUsageSummary, useUsageTrend, useApprovals, useAlertRules } from '../hooks/useApi';
@@ -68,30 +68,70 @@ export default function Dashboard() {
   const { data: alertRules = [] } = useAlertRules();
 
   const activeAgents = AGENTS.filter(a => a.status === 'active').length;
-  const activeBindings = BINDINGS.filter(b => b.status === 'active').length;
+  const boundBindings = BINDINGS.filter(b => b.status === 'bound' || b.status === 'active').length;
   const unboundEmployees = EMPLOYEES.filter(e => !e.agentId);
   const pendingApprovals = approvalsData?.pending?.length || 0;
   const activeAlerts = alertRules.filter(a => a.status === 'warning').length;
   const topDepts = DEPARTMENTS.filter(d => !d.parentId);
-  const avgQuality = AGENTS.filter(a => a.qualityScore).reduce((s, a) => s + (a.qualityScore || 0), 0) / AGENTS.filter(a => a.qualityScore).length;
-
-  const agentsByPosition = POSITIONS.map(p => AGENTS.filter(a => a.positionId === p.id).length);
-
+  const qualityAgents = AGENTS.filter(a => a.qualityScore);
+  const avgQuality = qualityAgents.length > 0
+    ? qualityAgents.reduce((s, a) => s + (a.qualityScore || 0), 0) / qualityAgents.length
+    : null;
   const channelCounts: Record<string, number> = {};
   BINDINGS.forEach(b => { channelCounts[b.channel] = (channelCounts[b.channel] || 0) + 1; });
   const channelSeries = ['telegram', 'whatsapp', 'slack', 'discord', 'feishu', 'dingtalk'].map(c => channelCounts[c] || 0);
+  const agentsByPosition = POSITIONS.map(p => AGENTS.filter(a => a.positionId === p.id).length);
+
+  // Setup checklist: first-time admin guidance
+  const setupDone = {
+    departments: DEPARTMENTS.length > 0,
+    positions: POSITIONS.length > 0,
+    employees: EMPLOYEES.length > 0,
+    agents: AGENTS.length > 0,
+    channels: Object.keys(channelCounts).length > 0,
+  };
+  const setupSteps = [
+    { key: 'departments', label: 'Create departments', href: '/org/departments' },
+    { key: 'positions', label: 'Create positions with SOUL & tools', href: '/org/positions' },
+    { key: 'employees', label: 'Add employees', href: '/org/employees' },
+    { key: 'agents', label: 'Create agents (or bulk provision)', href: '/agents' },
+    { key: 'channels', label: 'Connect IM channels', href: '/channels' },
+  ] as const;
+  const setupComplete = Object.values(setupDone).every(Boolean);
 
   return (
     <div>
       <PageHeader title="Dashboard" description="Organization-wide AI digital workforce overview" />
 
+      {/* Setup checklist — shown until all steps are complete */}
+      {!setupComplete && (
+        <div className="mb-6 rounded-2xl border border-primary/30 bg-primary/5 p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <Zap size={16} className="text-primary" />
+            <h3 className="text-sm font-semibold text-text-primary">Platform Setup Checklist</h3>
+            <span className="ml-auto text-xs text-text-muted">{Object.values(setupDone).filter(Boolean).length} / {setupSteps.length} complete</span>
+          </div>
+          <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-5">
+            {setupSteps.map(step => (
+              <button key={step.key} onClick={() => navigate(step.href)}
+                className={`flex items-center gap-2 rounded-xl px-3 py-2 text-left text-xs transition-colors ${setupDone[step.key] ? 'bg-success/10 text-success' : 'bg-dark-bg text-text-muted hover:bg-dark-hover hover:text-text-primary'}`}>
+                {setupDone[step.key]
+                  ? <CheckCircle2 size={14} className="shrink-0" />
+                  : <Circle size={14} className="shrink-0" />}
+                {step.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Stat cards */}
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6 mb-6">
-        <StatCard title="Departments" value={topDepts.length} subtitle={`${DEPARTMENTS.length} total`} icon={<Building2 size={22} />} color="primary" trend="up" trendValue="2 new" />
+        <StatCard title="Departments" value={topDepts.length} subtitle={`${DEPARTMENTS.length} total`} icon={<Building2 size={22} />} color="primary" />
         <StatCard title="Positions" value={POSITIONS.length} subtitle={`${POSITIONS.reduce((s, p) => s + p.memberCount, 0)} members`} icon={<Users size={22} />} color="info" />
-        <StatCard title="Employees" value={EMPLOYEES.length} subtitle={`${EMPLOYEES.filter(e => e.agentId).length} with agents`} icon={<Users size={22} />} color="cyan" trend="up" trendValue="+1 this week" />
-        <StatCard title="Active Agents" value={`${activeAgents}/${AGENTS.length}`} subtitle="online / total" icon={<Bot size={22} />} color="success" />
-        <StatCard title="Bindings" value={activeBindings} subtitle={`${Object.keys(channelCounts).length} channels`} icon={<Link2 size={22} />} color="warning" />
+        <StatCard title="Employees" value={EMPLOYEES.length} subtitle={`${EMPLOYEES.filter(e => e.agentId).length} with agents`} icon={<Users size={22} />} color="cyan" />
+        <StatCard title="Agents" value={`${activeAgents} active / ${AGENTS.length}`} subtitle="idle = serverless standby" icon={<Bot size={22} />} color="success" />
+        <StatCard title="Bindings" value={boundBindings} subtitle={`${Object.keys(channelCounts).length} channels`} icon={<Link2 size={22} />} color="warning" />
         <StatCard title="Live Sessions" value={LIVE_SESSIONS.length} subtitle={`${LIVE_SESSIONS.reduce((s, sess) => s + sess.turns, 0)} turns`} icon={<MessageSquare size={22} />} color="danger" />
       </div>
 
@@ -277,7 +317,7 @@ export default function Dashboard() {
               <div className="space-y-2">
                 <div className="flex items-center justify-between rounded-lg bg-dark-bg/50 px-3 py-2">
                   <span className="text-sm text-text-secondary">Avg Quality</span>
-                  <span className="text-sm font-medium text-warning">⭐ {avgQuality.toFixed(1)}</span>
+                  <span className="text-sm font-medium text-warning">⭐ {avgQuality !== null ? avgQuality.toFixed(1) : '—'}</span>
                 </div>
                 <div className="flex items-center justify-between rounded-lg bg-dark-bg/50 px-3 py-2">
                   <span className="text-sm text-text-secondary">Agent Coverage</span>

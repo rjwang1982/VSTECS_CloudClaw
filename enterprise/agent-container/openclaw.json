@@ -27,8 +27,17 @@
       "workspace": "/root/.openclaw/workspace",
       "skipBootstrap": true,
       "compaction": {
-        "mode": "safeguard"
+        "mode": "default",
+        "recentTurnsPreserve": 5
       }
+    }
+  },
+  "gateway": {
+    "port": 18789,
+    "mode": "local",
+    "bind": "loopback",
+    "auth": {
+      "mode": "none"
     }
   },
   "plugins": {

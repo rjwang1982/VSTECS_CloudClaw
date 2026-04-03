@@ -53,6 +53,43 @@ logger.info("openclaw binary: %s", OPENCLAW_BIN)
 _assembled_tenants: set = set()
 _assembly_lock = threading.Lock()
 
+# Config version tracking — when IT changes global SOUL/KB, the version bumps.
+# Every CONFIG_VERSION_CHECK_INTERVAL seconds, we query DynamoDB for the version.
+# If it changed, all tenants are evicted from _assembled_tenants so they re-assemble
+# on their next request (picking up the latest SOUL/KB from S3).
+_config_version: str = ""
+_config_version_checked_at: float = 0.0
+_CONFIG_VERSION_CHECK_INTERVAL = 300  # seconds (5 minutes)
+
+# Guardrail config read from environment variables set on the Runtime.
+# Exec Runtime has no GUARDRAIL_ID → no guardrail enforcement.
+GUARDRAIL_ID = os.environ.get("GUARDRAIL_ID", "")
+GUARDRAIL_VERSION = os.environ.get("GUARDRAIL_VERSION", "DRAFT")
+
+
+def _check_and_refresh_config_version() -> None:
+    """Check DynamoDB CONFIG#global-version and clear assembly cache if changed.
+    Called before each invocation; throttled to once per 5 minutes."""
+    global _config_version, _config_version_checked_at
+    now = time.time()
+    if now - _config_version_checked_at < _CONFIG_VERSION_CHECK_INTERVAL:
+        return
+    _config_version_checked_at = now
+    try:
+        import boto3 as _b3cv
+        ddb = _b3cv.resource("dynamodb", region_name=DYNAMODB_REGION)
+        resp = ddb.Table(DYNAMODB_TABLE).get_item(
+            Key={"PK": "ORG#acme", "SK": "CONFIG#global-version"})
+        new_version = resp.get("Item", {}).get("version", "")
+        if new_version and new_version != _config_version:
+            logger.info(
+                "Global config version changed: %s → %s — clearing assembly cache for %d tenants",
+                _config_version or "(initial)", new_version, len(_assembled_tenants))
+            _assembled_tenants.clear()
+            _config_version = new_version
+    except Exception as e:
+        logger.warning("Config version check failed (non-fatal): %s", e)
+
 WORKSPACE = os.environ.get("OPENCLAW_WORKSPACE", "/root/.openclaw/workspace")
 S3_BUCKET = os.environ.get("S3_BUCKET", "openclaw-tenants-000000000000")
 STACK_NAME = os.environ.get("STACK_NAME", "dev")
@@ -61,8 +98,73 @@ DYNAMODB_TABLE = os.environ.get("DYNAMODB_TABLE", "openclaw-enterprise")
 DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-east-2")
 
 
-def _write_usage_to_dynamodb(tenant_id: str, base_id: str, usage: dict, model: str, duration_ms: int):
-    """Fire-and-forget: write usage metrics and update session in DynamoDB.
+def _append_conversation_turn(tenant_id: str, user_message: str, assistant_reply: str, model: str, duration_ms: int):
+    """Append a user+assistant turn to DynamoDB CONV# AND local daily memory file.
+
+    The DynamoDB write enables Session Detail view in the Admin Console.
+    The local memory file write ensures memory persists even for short sessions
+    that never trigger OpenClaw Gateway's compaction threshold — the watchdog
+    syncs workspace/memory/{date}.md to S3 within 60s, so the next session
+    always has context regardless of session length.
+    """
+    from datetime import datetime, timezone
+    ts_dt = datetime.now(timezone.utc)
+    ts = ts_dt.isoformat()
+
+    # 1. Write to DynamoDB for Session Detail view
+    try:
+        import boto3 as _b3_conv
+        ddb = _b3_conv.resource("dynamodb", region_name=DYNAMODB_REGION)
+        table = ddb.Table(DYNAMODB_TABLE)
+        org_pk = "ORG#acme"
+        session_sk = f"SESSION#{tenant_id[:40]}"
+
+        try:
+            resp = table.get_item(Key={"PK": org_pk, "SK": session_sk})
+            turns = int(resp.get("Item", {}).get("turns", 0))
+        except Exception:
+            turns = 0
+
+        seq_base = (turns - 1) * 2
+        table.put_item(Item={
+            "PK": org_pk, "SK": f"CONV#{tenant_id[:40]}#{seq_base:04d}",
+            "sessionId": tenant_id[:40], "seq": seq_base, "role": "user",
+            "content": user_message[:2000], "ts": ts,
+        })
+        table.put_item(Item={
+            "PK": org_pk, "SK": f"CONV#{tenant_id[:40]}#{seq_base + 1:04d}",
+            "sessionId": tenant_id[:40], "seq": seq_base + 1, "role": "assistant",
+            "content": assistant_reply[:4000], "ts": ts,
+            "model": model, "durationMs": duration_ms,
+        })
+    except Exception as e:
+        logger.warning("CONV# write failed (non-fatal): %s", e)
+
+    # 2. Append to daily memory file — ensures memory persists for short sessions
+    # that never trigger Gateway compaction. OpenClaw reads memory/*.md at session
+    # start, so this guarantees continuity even for 1-message microVM sessions.
+    try:
+        workspace = os.environ.get("OPENCLAW_WORKSPACE", "/root/.openclaw/workspace")
+        memory_dir = os.path.join(workspace, "memory")
+        os.makedirs(memory_dir, exist_ok=True)
+        date_str = ts_dt.strftime("%Y-%m-%d")
+        time_str = ts_dt.strftime("%H:%M UTC")
+        daily_file = os.path.join(memory_dir, f"{date_str}.md")
+
+        entry = (
+            f"\n## {time_str}\n"
+            f"**User:** {user_message[:300]}\n"
+            f"**Agent:** {assistant_reply[:300]}\n"
+        )
+        with open(daily_file, "a", encoding="utf-8") as f:
+            f.write(entry)
+        logger.info("Memory checkpoint written: %s", daily_file)
+    except Exception as e:
+        logger.warning("Daily memory write failed (non-fatal): %s", e)
+
+
+def _write_usage_to_dynamodb(tenant_id: str, base_id: str, usage: dict, model: str, duration_ms: int, message: str = ""):
+    """Fire-and-forget: write usage metrics, session, and audit entry to DynamoDB.
     Runs in a background thread to avoid blocking the response."""
     try:
         import boto3 as _b3
@@ -101,11 +203,14 @@ def _write_usage_to_dynamodb(tenant_id: str, base_id: str, usage: dict, model: s
         )
 
         # 2. Update or create SESSION#{tenant_id} — increment turns, update lastMessage
+        # 'id' is set explicitly so the admin console can find sessions by ID without parsing the SK
+        session_id = tenant_id[:40]
         table.update_item(
-            Key={"PK": org_pk, "SK": f"SESSION#{tenant_id[:40]}"},
-            UpdateExpression="SET agentId = :aid, employeeId = :eid, #s = :status, lastActive = :now, GSI1PK = :gsi1pk, GSI1SK = :gsi1sk ADD turns :one, tokensUsed :tokens",
+            Key={"PK": org_pk, "SK": f"SESSION#{session_id}"},
+            UpdateExpression="SET id = :id, agentId = :aid, employeeId = :eid, #s = :status, lastActive = :now, GSI1PK = :gsi1pk, GSI1SK = :gsi1sk ADD turns :one, tokensUsed :tokens",
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={
+                ":id": session_id,
                 ":aid": base_id,
                 ":eid": base_id,
                 ":status": "active",
@@ -113,11 +218,55 @@ def _write_usage_to_dynamodb(tenant_id: str, base_id: str, usage: dict, model: s
                 ":one": 1,
                 ":tokens": total_tokens,
                 ":gsi1pk": "TYPE#session",
-                ":gsi1sk": f"SESSION#{tenant_id[:40]}",
+                ":gsi1sk": f"SESSION#{session_id}",
             },
         )
 
         logger.info("DynamoDB usage written: %s tokens=%d cost=%s", base_id, total_tokens, cost)
+
+        # 3. Write audit entry — makes ALL channels (Discord, Telegram, Portal) visible
+        #    in the Admin Console Audit Center, not just Portal chat.
+        #    Try to resolve the employee display name from DynamoDB EMP# record.
+        actor_name = base_id
+        try:
+            emp_resp = table.get_item(Key={"PK": "ORG#acme", "SK": f"EMP#{base_id}"})
+            emp_item = emp_resp.get("Item", {})
+            if emp_item.get("name"):
+                actor_name = emp_item["name"]
+        except Exception:
+            pass
+
+        # Detect channel from tenant_id prefix (wa__, tg__, dc__, sl__, port__, etc.)
+        channel = "unknown"
+        t_parts = tenant_id.split("__")
+        if t_parts:
+            ch_map = {"wa": "WhatsApp", "tg": "Telegram", "dc": "Discord",
+                      "sl": "Slack", "ms": "Teams", "im": "iMessage",
+                      "gc": "Google Chat", "web": "Web", "port": "Portal"}
+            channel = ch_map.get(t_parts[0], t_parts[0].upper())
+
+        detail_msg = message[:100] if message else "(no message)"
+        audit_id = f"aud-{int(now.timestamp() * 1000)}"  # ms precision avoids overwrite
+        table.put_item(Item={
+            "PK": "ORG#acme",
+            "SK": f"AUDIT#{audit_id}",
+            "GSI1PK": "TYPE#audit",
+            "GSI1SK": f"AUDIT#{audit_id}",
+            "id": audit_id,
+            "timestamp": now.isoformat(),
+            "eventType": "agent_invocation",
+            "actorId": base_id,
+            "actorName": actor_name,
+            "targetType": "agent",
+            "targetId": base_id,
+            "channel": channel,
+            "detail": f"{channel} chat: {detail_msg}",
+            "status": "success",
+            "durationMs": duration_ms,
+            "model": model,
+        })
+        logger.info("Audit entry written: %s channel=%s", audit_id, channel)
+
     except Exception as e:
         logger.warning("DynamoDB usage write failed (non-fatal): %s", e)
 
@@ -175,16 +324,38 @@ def _ensure_workspace_assembled(tenant_id: str) -> None:
             except Exception as e:
                 logger.warning("SSM user-mapping lookup failed: %s", e)
 
+        # 0. Load shared OpenClaw credentials (discord allowFrom list) into microVM
+        #    This is how the microVM knows which Discord users are approved.
+        #    The EC2 updates this file on every pairing approval and uploads to S3.
+        creds_dir = "/root/.openclaw/credentials"
+        os.makedirs(creds_dir, exist_ok=True)
+        try:
+            subprocess.run(
+                ["aws", "s3", "cp",
+                 f"s3://{S3_BUCKET}/_shared/openclaw-creds/discord-default-allowFrom.json",
+                 f"{creds_dir}/discord-default-allowFrom.json", "--quiet"],
+                capture_output=True, text=True, timeout=10
+            )
+            logger.info("Discord allowFrom credentials loaded into microVM")
+        except Exception as e:
+            logger.warning("Could not load discord credentials (non-fatal): %s", e)
+
         # 1. Sync tenant's personal workspace from S3 using BASE ID
+        # IMPORTANT: Use 'cp --recursive' instead of 'sync' to force S3 → local overwrite.
+        # The entrypoint.sh initial sync uses tenant=unknown, creating empty workspace files.
+        # 'aws s3 sync' won't overwrite these because the local files are newer.
+        # 'aws s3 cp --recursive' always downloads from S3, ensuring seed data (MEMORY.md,
+        # USER.md, memory/*.md) is correctly loaded.
         s3_base = f"s3://{S3_BUCKET}/{base_id}"
         try:
             subprocess.run(
-                ["aws", "s3", "sync", f"{s3_base}/workspace/", f"{WORKSPACE}/", "--quiet"],
+                ["aws", "s3", "cp", f"{s3_base}/workspace/", f"{WORKSPACE}/",
+                 "--recursive", "--quiet"],
                 capture_output=True, text=True, timeout=30
             )
-            logger.info("S3 workspace synced for tenant %s (base: %s)", tenant_id, base_id)
+            logger.info("S3 workspace copied for tenant %s (base: %s)", tenant_id, base_id)
         except Exception as e:
-            logger.warning("S3 sync failed for %s: %s", tenant_id, e)
+            logger.warning("S3 cp failed for %s: %s", tenant_id, e)
 
         # 2. Run workspace_assembler.py to merge three-layer SOUL
         assembler = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workspace_assembler.py")
@@ -209,20 +380,50 @@ def _ensure_workspace_assembled(tenant_id: str) -> None:
             logger.warning("workspace_assembler.py not found at %s", assembler)
 
         # 3. Plan A: Prepend permission constraints to merged SOUL.md
-        # This is the hard enforcement layer — even if the LLM ignores SOUL instructions,
-        # the constraints appear at the very top of the system prompt.
+        # Skip for exec profile — SOUL.md already declares full tool access,
+        # and injecting restrictions would conflict with the executive tier design.
         soul_path = os.path.join(WORKSPACE, "SOUL.md")
         if os.path.isfile(soul_path):
             try:
-                constraint = _build_system_prompt(tenant_id)
-                if constraint:
+                profile = read_permission_profile(tenant_id)
+                is_exec = profile.get("role") == "exec" or profile.get("profile") == "exec"
+                # Detect digital twin channel (twin__emp_id__...)
+                is_twin = tenant_id.startswith("twin__")
+                if not is_exec and not is_twin:
+                    constraint = _build_system_prompt(tenant_id)
+                    if constraint:
+                        with open(soul_path, "r") as f:
+                            existing = f.read()
+                        if "Allowed tools for this session" not in existing:
+                            with open(soul_path, "w") as f:
+                                f.write(f"<!-- PLAN A: PERMISSION ENFORCEMENT -->\n{constraint}\n\n---\n\n{existing}")
+                            logger.info("Plan A constraints injected into SOUL.md for %s", tenant_id)
+                elif is_twin:
+                    # Digital twin mode: inject representative persona context
                     with open(soul_path, "r") as f:
                         existing = f.read()
-                    # Only prepend if not already present (idempotent)
-                    if "Allowed tools for this session" not in existing:
-                        with open(soul_path, "w") as f:
-                            f.write(f"<!-- PLAN A: PERMISSION ENFORCEMENT -->\n{constraint}\n\n---\n\n{existing}")
-                        logger.info("Plan A constraints injected into SOUL.md for %s", tenant_id)
+                    if "DIGITAL TWIN MODE" not in existing:
+                        # Extract employee name from workspace files
+                        user_md_path = os.path.join(WORKSPACE, "USER.md")
+                        user_md = ""
+                        if os.path.isfile(user_md_path):
+                            with open(user_md_path) as f:
+                                user_md = f.read()[:500]
+                        twin_ctx = (
+                            "\n\n<!-- DIGITAL TWIN MODE -->\n"
+                            "You are this employee's AI digital representative. Someone is accessing your owner's digital twin link.\n"
+                            "- Introduce yourself as their AI assistant standing in for them\n"
+                            "- Answer based on their expertise, SOUL profile, and memory\n"
+                            "- If asked where they are: explain they are unavailable but you can help\n"
+                            "- Be warm, professional, and helpful — represent them well\n"
+                            "- Use `web_search` to look up current information when needed\n"
+                            "- Do NOT reveal private/sensitive internal data\n"
+                        )
+                        with open(soul_path, "a") as f:
+                            f.write(twin_ctx)
+                        logger.info("Digital twin context injected for %s", tenant_id)
+                else:
+                    logger.info("Plan A skipped for exec profile tenant %s", tenant_id)
             except Exception as e:
                 logger.warning("Plan A injection failed for %s: %s", tenant_id, e)
 
@@ -250,8 +451,254 @@ def _ensure_workspace_assembled(tenant_id: str) -> None:
         except IOError:
             pass
 
+        # Synthesize MEMORY.md from daily memory files if it's empty.
+        # In serverless AgentCore microVMs, the OpenClaw Gateway compaction daemon
+        # never runs persistently, so MEMORY.md stays at "# Memory" (9 bytes) forever.
+        # We fix this by concatenating recent daily memory files into MEMORY.md at
+        # session start so the agent has cross-session context.
+        try:
+            memory_md_path = os.path.join(WORKSPACE, "MEMORY.md")
+            memory_dir = os.path.join(WORKSPACE, "memory")
+            current_content = ""
+            if os.path.isfile(memory_md_path):
+                with open(memory_md_path) as f:
+                    current_content = f.read().strip()
+
+            # Synthesize only if MEMORY.md is empty / just a header
+            if len(current_content) < 50 and os.path.isdir(memory_dir):
+                daily_files = sorted(
+                    [f for f in os.listdir(memory_dir) if f.endswith(".md")],
+                    reverse=True)[:3]  # last 3 days
+                if daily_files:
+                    parts = ["# Memory\n\n*Auto-synthesized from recent conversations*\n"]
+                    for fname in daily_files:
+                        fpath = os.path.join(memory_dir, fname)
+                        try:
+                            with open(fpath) as f:
+                                content = f.read().strip()
+                            if content:
+                                date_str = fname.replace(".md", "")
+                                parts.append(f"\n## {date_str}\n{content[:3000]}")
+                        except Exception:
+                            pass
+                    if len(parts) > 1:
+                        with open(memory_md_path, "w") as f:
+                            f.write("\n".join(parts))
+                        logger.info("MEMORY.md synthesized from %d daily files for %s",
+                                    len(daily_files), base_id)
+        except Exception as e:
+            logger.warning("MEMORY.md synthesis failed (non-fatal): %s", e)
+
+        # 5. Dynamic agent config: read from DynamoDB and update openclaw.json
+        # Hierarchy: employee override > position override > global default
+        # Covers: model, memory compaction, context window, language preference
+        try:
+            import boto3 as _b3_model
+            ddb = _b3_model.resource("dynamodb", region_name=DYNAMODB_REGION)
+            table = ddb.Table(DYNAMODB_TABLE)
+
+            # Read position for this employee
+            pos_id = ""
+            try:
+                ssm_client = _b3_model.client("ssm", region_name=AWS_REGION_RUNTIME)
+                pos_resp = ssm_client.get_parameter(
+                    Name=f"/openclaw/{STACK_NAME}/tenants/{base_id}/position")
+                pos_id = pos_resp["Parameter"]["Value"]
+            except Exception:
+                pass
+
+            # --- Model ---
+            model_config_resp = table.get_item(Key={"PK": "ORG#acme", "SK": "CONFIG#model"})
+            if "Item" in model_config_resp:
+                mc = model_config_resp["Item"]
+                emp_model_overrides = mc.get("employeeOverrides", {})
+                pos_model_overrides = mc.get("positionOverrides", {})
+
+                if base_id in emp_model_overrides:
+                    new_model_id = emp_model_overrides[base_id].get("modelId", "")
+                    logger.info("Employee model override: %s → %s", base_id, new_model_id)
+                elif pos_id and pos_id in pos_model_overrides:
+                    new_model_id = pos_model_overrides[pos_id].get("modelId", "")
+                    logger.info("Position model override: %s → %s", pos_id, new_model_id)
+                else:
+                    new_model_id = mc.get("default", {}).get("modelId", "")
+
+                if new_model_id:
+                    oc_config_path = os.path.expanduser("~/.openclaw/openclaw.json")
+                    if os.path.isfile(oc_config_path):
+                        with open(oc_config_path) as f:
+                            oc_config = json.load(f)
+                        old_model = os.environ.get("BEDROCK_MODEL_ID", "global.amazon.nova-2-lite-v1:0")
+                        oc_json_str = json.dumps(oc_config)
+                        oc_json_str = oc_json_str.replace(old_model, new_model_id)
+                        with open(oc_config_path, "w") as f:
+                            f.write(oc_json_str)
+                        os.environ["BEDROCK_MODEL_ID"] = new_model_id
+                        logger.info("Model updated to %s", new_model_id)
+
+            # --- Agent Config (compaction, context, language) ---
+            agent_cfg_resp = table.get_item(Key={"PK": "ORG#acme", "SK": "CONFIG#agent-config"})
+            if "Item" in agent_cfg_resp:
+                agent_cfg = agent_cfg_resp["Item"]
+                emp_cfg  = agent_cfg.get("employeeConfig", {}).get(base_id, {})
+                pos_cfg  = agent_cfg.get("positionConfig", {}).get(pos_id, {}) if pos_id else {}
+                eff_cfg  = {**pos_cfg, **emp_cfg}  # employee wins over position
+
+                oc_config_path = os.path.expanduser("~/.openclaw/openclaw.json")
+                if eff_cfg and os.path.isfile(oc_config_path):
+                    with open(oc_config_path) as f:
+                        oc = json.load(f)
+                    changed = False
+
+                    # Memory compaction
+                    if "recentTurnsPreserve" in eff_cfg:
+                        oc.setdefault("agents", {}).setdefault("defaults", {}).setdefault("compaction", {})["recentTurnsPreserve"] = int(eff_cfg["recentTurnsPreserve"])
+                        changed = True
+                    if "compactionMode" in eff_cfg:
+                        oc.setdefault("agents", {}).setdefault("defaults", {}).setdefault("compaction", {})["mode"] = eff_cfg["compactionMode"]
+                        changed = True
+
+                    # Context window / max tokens
+                    if "maxTokens" in eff_cfg:
+                        for provider in oc.get("models", {}).get("providers", {}).values():
+                            for m in provider.get("models", []):
+                                m["maxTokens"] = int(eff_cfg["maxTokens"])
+                        changed = True
+
+                    if changed:
+                        with open(oc_config_path, "w") as f:
+                            json.dump(oc, f, indent=2)
+                        logger.info("Agent config applied for %s: %s", base_id, list(eff_cfg.keys()))
+
+                    # Language preference: inject at end of SOUL.md
+                    lang = eff_cfg.get("language", "")
+                    if lang:
+                        soul_path = os.path.join(WORKSPACE, "SOUL.md")
+                        if os.path.isfile(soul_path):
+                            lang_note = f"\n\n<!-- LANGUAGE PREFERENCE -->\nAlways respond in **{lang}** unless the user explicitly writes in a different language."
+                            with open(soul_path, "a") as f:
+                                f.write(lang_note)
+                            logger.info("Language preference injected: %s", lang)
+
+            # --- Knowledge Base injection ---
+            # Inject position/employee KB documents into workspace/knowledge/
+            kb_cfg_resp = table.get_item(Key={"PK": "ORG#acme", "SK": "CONFIG#kb-assignments"})
+            if "Item" in kb_cfg_resp:
+                kb_cfg = kb_cfg_resp["Item"]
+                kb_ids = set()
+                for pid in ([pos_id] if pos_id else []):
+                    kb_ids.update(kb_cfg.get("positionKBs", {}).get(pid, []))
+                kb_ids.update(kb_cfg.get("employeeKBs", {}).get(base_id, []))
+
+                if kb_ids:
+                    import boto3 as _b3kb
+                    s3_kb = _b3kb.client("s3")
+                    kb_dir = os.path.join(WORKSPACE, "knowledge")
+                    os.makedirs(kb_dir, exist_ok=True)
+                    kb_soul_lines = []
+                    for kb_id in kb_ids:
+                        try:
+                            kb_item = table.get_item(Key={"PK": "ORG#acme", "SK": f"KB#{kb_id}"}).get("Item")
+                            if not kb_item:
+                                continue
+                            # Build files list: use explicit files array if present,
+                            # otherwise fall back to listing the s3Prefix.
+                            # seed_knowledge.py creates KB items with s3Prefix only (no files array),
+                            # so the s3Prefix fallback is required for freshly seeded deployments.
+                            files_list = kb_item.get("files", [])
+                            if not files_list:
+                                s3_prefix = kb_item.get("s3Prefix", "")
+                                if s3_prefix:
+                                    try:
+                                        resp = s3_kb.list_objects_v2(Bucket=S3_BUCKET, Prefix=s3_prefix)
+                                        for obj in resp.get("Contents", []):
+                                            key = obj["Key"]
+                                            fname = key.split("/")[-1]
+                                            if fname and not fname.startswith("."):
+                                                files_list.append({"s3Key": key, "filename": fname})
+                                    except Exception as list_err:
+                                        logger.warning("KB prefix listing failed for %s: %s", kb_id, list_err)
+                            # Download KB files into workspace/knowledge/{kb_id}/
+                            kb_sub = os.path.join(kb_dir, kb_id)
+                            os.makedirs(kb_sub, exist_ok=True)
+                            for file_ref in files_list:
+                                s3_key = file_ref.get("s3Key", "")
+                                fname = file_ref.get("filename", s3_key.split("/")[-1])
+                                local_path = os.path.join(kb_sub, fname)
+                                if not os.path.isfile(local_path):
+                                    obj = s3_kb.get_object(Bucket=S3_BUCKET, Key=s3_key)
+                                    with open(local_path, "wb") as f:
+                                        f.write(obj["Body"].read())
+                            kb_soul_lines.append(f"- **{kb_item.get('name', kb_id)}**: {os.path.join(kb_sub, '')}")
+                            logger.info("KB injected: %s → %s", kb_id, kb_sub)
+                        except Exception as ke:
+                            logger.warning("KB injection failed for %s: %s", kb_id, ke)
+
+                    # Append KB paths to SOUL.md so agent knows where to look
+                    if kb_soul_lines:
+                        soul_path = os.path.join(WORKSPACE, "SOUL.md")
+                        if os.path.isfile(soul_path):
+                            # Build KB block with specific proactive instructions
+                            kb_lines_text = "\n".join(kb_soul_lines)
+                            # For org-directory KB: inline the content directly into SOUL.md
+                            # Read from S3 (reliable — no EFS path timing issues).
+                            org_dir_inline = ""
+                            if any("org-directory" in line or "Company Directory" in line
+                                   for line in kb_soul_lines):
+                                try:
+                                    org_obj = s3_kb.get_object(
+                                        Bucket=S3_BUCKET,
+                                        Key="_shared/knowledge/org-directory/company-directory.md"
+                                    )
+                                    dir_content = org_obj["Body"].read().decode("utf-8")
+                                    org_dir_inline = (
+                                        "\n\n<!-- COMPANY DIRECTORY (inline) -->\n"
+                                        "The following is the complete ACME Corp employee directory. "
+                                        "Use this to answer any question about colleagues, contacts, "
+                                        "departments, or who to reach for any topic:\n\n"
+                                        + dir_content
+                                    )
+                                    logger.info("Org directory inlined into SOUL.md (%d chars)", len(dir_content))
+                                except Exception as e:
+                                    logger.warning("Org directory inline failed: %s", e)
+                            kb_block = (
+                                "\n\n<!-- KNOWLEDGE BASES -->\n"
+                                "You have access to the following knowledge base documents:\n"
+                                + kb_lines_text
+                                + "\nUse the `file` tool to read these when relevant to the user's question."
+                                + org_dir_inline
+                            )
+                            with open(soul_path, "a") as f:
+                                f.write(kb_block)
+
+        except Exception as e:
+            logger.warning("Dynamic agent config failed (non-fatal): %s", e)
+
+        # CHANNELS.md is generated by workspace_assembler.py (step 7).
+        # It runs both at container startup (entrypoint.sh bg worker) and here on
+        # first request, so always-on containers have it before the first message.
+
+        # In EFS mode, the OpenClaw Gateway (started at container boot) reads SOUL.md
+        # from its default workspace path: HOME/.openclaw/workspace/ (= /.openclaw/workspace/).
+        # OPENCLAW_WORKSPACE points to the EFS path, but the Gateway may have cached its
+        # workspace from startup (before the EFS was populated). Mirror the assembled
+        # SOUL.md to the Gateway's default workspace so it always has the latest version.
+        default_workspace = os.path.expanduser("~/.openclaw/workspace")
+        if default_workspace != WORKSPACE:
+            try:
+                import shutil
+                os.makedirs(default_workspace, exist_ok=True)
+                for fname in ["SOUL.md", "AGENTS.md", "TOOLS.md", "IDENTITY.md", "CHANNELS.md"]:
+                    src = os.path.join(WORKSPACE, fname)
+                    if os.path.isfile(src):
+                        shutil.copy2(src, os.path.join(default_workspace, fname))
+                logger.info("Mirrored workspace files to Gateway default path: %s", default_workspace)
+            except Exception as e:
+                logger.warning("Gateway workspace mirror failed (non-fatal): %s", e)
+
         _assembled_tenants.add(tenant_id)
         logger.info("Workspace ready for tenant %s", tenant_id)
+
 
 
 def _build_system_prompt(tenant_id: str) -> str:
@@ -291,6 +738,43 @@ def _audit_response(tenant_id: str, response_text: str, allowed_tools: list) -> 
                 request_id=None,
             )
             logger.warning("AUDIT: blocked tool '%s' in response tenant_id=%s", tool, tenant_id)
+
+
+def _sync_heartbeat_and_memory(base_id: str) -> None:
+    """Immediately sync HEARTBEAT.md and memory/*.md to S3 after each invocation.
+
+    AgentCore microVMs may receive SIGKILL (not SIGTERM) after returning a response,
+    which bypasses entrypoint.sh cleanup(). This function ensures reminders and per-turn
+    memory reach S3 so the next session can load them — even if the microVM is killed
+    immediately after.
+    """
+    if not base_id or base_id == "unknown":
+        return
+    sync_target = f"s3://{S3_BUCKET}/{base_id}/workspace/"
+    try:
+        # Sync memory directory (daily checkpoint files written by _append_conversation_turn)
+        subprocess.run(
+            ["aws", "s3", "sync", os.path.join(WORKSPACE, "memory") + "/",
+             f"{sync_target}memory/", "--quiet"],
+            capture_output=True, text=True, timeout=15,
+        )
+        # Copy HEARTBEAT.md if it exists (created by OpenClaw when user sets a reminder)
+        heartbeat_path = os.path.join(WORKSPACE, "HEARTBEAT.md")
+        if os.path.isfile(heartbeat_path):
+            subprocess.run(
+                ["aws", "s3", "cp", heartbeat_path, f"{sync_target}HEARTBEAT.md", "--quiet"],
+                capture_output=True, text=True, timeout=10,
+            )
+            logger.info("HEARTBEAT.md synced to S3 for %s", base_id)
+        # Copy MEMORY.md if it exists (updated by Gateway compaction)
+        memory_md_path = os.path.join(WORKSPACE, "MEMORY.md")
+        if os.path.isfile(memory_md_path):
+            subprocess.run(
+                ["aws", "s3", "cp", memory_md_path, f"{sync_target}MEMORY.md", "--quiet"],
+                capture_output=True, text=True, timeout=10,
+            )
+    except Exception as e:
+        logger.warning("Post-invocation S3 sync failed (non-fatal): %s", e)
 
 
 def invoke_openclaw(tenant_id: str, message: str, timeout: int = 300, max_retries: int = 2) -> dict:
@@ -354,13 +838,18 @@ def _invoke_openclaw_once(tenant_id: str, message: str, timeout: int = 300) -> d
         "--timeout", str(timeout),
     ]
 
-    # If running as root (EC2 host), sudo to ubuntu so openclaw config is accessible
-    # Use 'sudo -u ubuntu env KEY=VAL ...' and do NOT pass env= to subprocess
-    # (subprocess env= would override the sudo env vars)
+    # If running as root on EC2 host (not inside an ECS container), sudo to ubuntu
+    # so openclaw can find its config at /home/ubuntu/.openclaw/.
+    # In ECS containers, openclaw.json is at $HOME/.openclaw/ (HOME=/ for root process)
+    # and /home/ubuntu exists from the base image — using sudo would look for config
+    # in /home/ubuntu/.openclaw/ (not found) and lose the workspace path.
+    # Detect ECS via ECS_CONTAINER_METADATA_URI_V4 env var (set by Fargate automatically).
     run_env = None  # None = inherit current process env (used in container as ubuntu)
-    if os.geteuid() == 0 and os.path.isdir("/home/ubuntu"):
+    in_ecs = bool(os.environ.get("ECS_CONTAINER_METADATA_URI_V4"))
+    if os.geteuid() == 0 and os.path.isdir("/home/ubuntu") and not in_ecs:
         path_val = env.get("PATH", "/usr/local/bin:/usr/bin:/bin")
         aws_region = env.get("AWS_REGION", "us-east-1")
+        workspace_val = env.get("OPENCLAW_WORKSPACE", WORKSPACE)
         cmd = [
             "sudo", "-u", "ubuntu",
             "env",
@@ -368,6 +857,8 @@ def _invoke_openclaw_once(tenant_id: str, message: str, timeout: int = 300) -> d
             "HOME=/home/ubuntu",
             f"AWS_REGION={aws_region}",
             f"AWS_DEFAULT_REGION={aws_region}",
+            f"OPENCLAW_WORKSPACE={workspace_val}",
+            "OPENCLAW_SKIP_ONBOARDING=1",
         ] + openclaw_cmd
         run_env = None  # let sudo handle the environment
     else:
@@ -421,6 +912,110 @@ def _invoke_openclaw_once(tenant_id: str, message: str, timeout: int = 300) -> d
     return data
 
 
+def _apply_guardrail(text: str, source: str, tenant_id: str) -> str:
+    """Apply Bedrock Guardrail to text.  Returns the blockedMessaging string if
+    content was blocked/filtered; returns empty string if content passes.
+    source must be 'INPUT' or 'OUTPUT'.
+    Logs a guardrail_block audit event to DynamoDB if blocked."""
+    try:
+        import boto3 as _b3gr
+        region = os.environ.get("AWS_REGION", "us-east-1")
+        bedrock = _b3gr.client("bedrock-runtime", region_name=region)
+        resp = bedrock.apply_guardrail(
+            guardrailIdentifier=GUARDRAIL_ID,
+            guardrailVersion=GUARDRAIL_VERSION,
+            source=source,
+            content=[{"text": {"text": text}}],
+        )
+        action = resp.get("action", "NONE")
+        if action in ("GUARDRAIL_INTERVENED",):
+            # Extract the blockedMessaging from outputs
+            blocked_msg = ""
+            for out in resp.get("outputs", []):
+                t = out.get("text", "")
+                if t:
+                    blocked_msg = t
+                    break
+            if not blocked_msg:
+                blocked_msg = "该话题涉及未公开业务信息。根据合规政策，AI 助手无法提供相关内容，请联系合规部门。"
+
+            # Log guardrail_block audit event (fire-and-forget)
+            policy_name = ""
+            assessments = resp.get("assessments", [])
+            if assessments:
+                topics = assessments[0].get("topicPolicy", {}).get("topics", [])
+                if topics:
+                    policy_name = topics[0].get("name", "")
+
+            threading.Thread(
+                target=_write_guardrail_block_to_dynamodb,
+                args=(tenant_id, text[:200], source, policy_name),
+                daemon=True,
+            ).start()
+
+            logger.info("Guardrail %s BLOCKED source=%s tenant=%s policy=%s", GUARDRAIL_ID, source, tenant_id, policy_name)
+            return blocked_msg
+        return ""
+    except Exception as e:
+        logger.warning("Guardrail check failed (non-fatal, allowing): %s", e)
+        return ""
+
+
+def _write_guardrail_block_to_dynamodb(tenant_id: str, input_snippet: str, source: str, policy_name: str):
+    """Write a guardrail_block audit event to DynamoDB."""
+    try:
+        import boto3 as _b3gb
+        from datetime import datetime, timezone
+        ddb = _b3gb.resource("dynamodb", region_name=DYNAMODB_REGION)
+        table = ddb.Table(DYNAMODB_TABLE)
+        now = datetime.now(timezone.utc)
+        audit_id = f"grd-{int(now.timestamp() * 1000)}"
+
+        # Resolve display name
+        base_id = tenant_id
+        parts = tenant_id.split("__")
+        if len(parts) >= 2:
+            base_id = parts[1]
+        try:
+            with open("/tmp/base_tenant_id") as f:
+                resolved = f.read().strip()
+                if resolved and resolved != "unknown":
+                    base_id = resolved
+        except Exception:
+            pass
+
+        actor_name = base_id
+        try:
+            emp_resp = table.get_item(Key={"PK": "ORG#acme", "SK": f"EMP#{base_id}"})
+            emp_item = emp_resp.get("Item", {})
+            if emp_item.get("name"):
+                actor_name = emp_item["name"]
+        except Exception:
+            pass
+
+        table.put_item(Item={
+            "PK": "ORG#acme",
+            "SK": f"AUDIT#{audit_id}",
+            "GSI1PK": "TYPE#audit",
+            "GSI1SK": f"AUDIT#{audit_id}",
+            "id": audit_id,
+            "timestamp": now.isoformat(),
+            "eventType": "guardrail_block",
+            "actorId": base_id,
+            "actorName": actor_name,
+            "targetType": "guardrail",
+            "targetId": GUARDRAIL_ID,
+            "guardrailId": GUARDRAIL_ID,
+            "guardrailVersion": GUARDRAIL_VERSION,
+            "guardrailSource": source,
+            "guardrailPolicy": policy_name,
+            "detail": f"Guardrail blocked {source.lower()}: {input_snippet}",
+            "status": "blocked",
+        })
+    except Exception as e:
+        logger.warning("Guardrail block audit write failed (non-fatal): %s", e)
+
+
 class AgentCoreHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):  # noqa: A002
@@ -470,6 +1065,39 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
         self._handle_invocation(tenant_id, message, payload)
 
     def _handle_invocation(self, tenant_id: str, message: str, payload: dict):
+        # Check if global config (SOUL/KB) changed — evicts stale assembly cache
+        _check_and_refresh_config_version()
+
+        # ── Guardrail INPUT check ─────────────────────────────────────────────
+        # Reads GUARDRAIL_ID from env (set per-Runtime). Exec Runtime has no
+        # GUARDRAIL_ID so this is a no-op for exec agents.
+        if GUARDRAIL_ID:
+            blocked_msg = _apply_guardrail(message, source="INPUT", tenant_id=tenant_id)
+            if blocked_msg:
+                self._respond(200, {"response": blocked_msg, "status": "guardrail_blocked", "guardrailId": GUARDRAIL_ID})
+                return
+
+        # Check session takeover — if admin has taken over, skip agent invocation
+        stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+        region = os.environ.get("AWS_REGION", "us-east-1")
+        session_key = tenant_id[:40]
+        try:
+            import boto3 as _b3tk
+            ssm_tk = _b3tk.client("ssm", region_name=region)
+            admin_param = ssm_tk.get_parameter(
+                Name=f"/openclaw/{stack}/sessions/{session_key}/takeover")
+            admin_id = admin_param["Parameter"]["Value"]
+            logger.info("Session %s is in takeover by %s — skipping agent", session_key, admin_id)
+            self._respond(200, {
+                "response": "",
+                "status": "takeover",
+                "takenOverBy": admin_id,
+                "message": "Session is being managed by a human admin.",
+            })
+            return
+        except Exception:
+            pass  # Not in takeover, proceed normally
+
         # Ensure workspace is assembled for this tenant (first invocation only)
         _ensure_workspace_assembled(tenant_id)
 
@@ -479,16 +1107,27 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
             data = invoke_openclaw(tenant_id, message, timeout=timeout)
             duration_ms = int(time.time() * 1000) - start_ms
 
-            # Extract text from openclaw JSON response
-            # Format: {"payloads": [{"text": "..."}], "meta": {...}}
-            payloads = data.get("payloads", [])
+            # Extract text from openclaw JSON response.
+            # Embedded mode:  {"payloads": [...], "meta": {...}}
+            # Gateway mode:   {"runId": "...", "result": {"payloads": [...], "meta": {...}}}
+            result_block = data.get("result", data)  # unwrap Gateway's "result" wrapper
+            payloads = result_block.get("payloads", [])
             response_text = " ".join(
                 p.get("text", "") for p in payloads if p.get("text")
             ).strip()
 
             if not response_text:
-                # Fallback: try top-level text field
-                response_text = data.get("text", str(data))
+                response_text = result_block.get("text", data.get("text", ""))
+            if not response_text:
+                logger.warning("Empty response_text from openclaw, raw data keys: %s", list(data.keys()))
+                response_text = "(no response)"
+
+            # ── Guardrail OUTPUT check ────────────────────────────────────────
+            if GUARDRAIL_ID:
+                blocked_msg = _apply_guardrail(response_text, source="OUTPUT", tenant_id=tenant_id)
+                if blocked_msg:
+                    self._respond(200, {"response": blocked_msg, "status": "guardrail_blocked", "guardrailId": GUARDRAIL_ID})
+                    return
 
             # Plan E audit
             try:
@@ -499,7 +1138,7 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
             _audit_response(tenant_id, response_text, allowed)
 
             # Extract model usage for observability
-            meta = data.get("meta", {})
+            meta = result_block.get("meta", data.get("meta", {}))
             agent_meta = meta.get("agentMeta", {})
             model = agent_meta.get("model", "unknown")
             usage = agent_meta.get("usage", {})
@@ -530,9 +1169,27 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
                         base_id = resolved
             except Exception:
                 pass
+
             threading.Thread(
                 target=_write_usage_to_dynamodb,
-                args=(tenant_id, base_id, usage, model, duration_ms),
+                args=(tenant_id, base_id, usage, model, duration_ms, message),
+                daemon=True,
+            ).start()
+
+            # Fire-and-forget: write conversation turn to DynamoDB for Session Detail view
+            threading.Thread(
+                target=_append_conversation_turn,
+                args=(tenant_id, message, response_text, model, duration_ms),
+                daemon=True,
+            ).start()
+
+            # Fire-and-forget: immediately sync HEARTBEAT.md + memory to S3 after each turn.
+            # AgentCore microVMs may be killed (SIGKILL) after the response without SIGTERM,
+            # bypassing the cleanup() flush. Syncing here ensures reminders and memory
+            # reach S3 regardless of how the microVM terminates.
+            threading.Thread(
+                target=_sync_heartbeat_and_memory,
+                args=(base_id,),
                 daemon=True,
             ).start()
 

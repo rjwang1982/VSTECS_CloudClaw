@@ -1,5 +1,29 @@
-import { ReactNode } from 'react';
+import { ReactNode, Component, ErrorInfo } from 'react';
 import clsx from 'clsx';
+
+// === Error Boundary ===
+interface EBState { error: Error | null }
+export class ErrorBoundary extends Component<{ children: ReactNode; fallback?: ReactNode }, EBState> {
+  state: EBState = { error: null };
+  static getDerivedStateFromError(error: Error): EBState { return { error }; }
+  componentDidCatch(error: Error, info: ErrorInfo) { console.error('[ErrorBoundary]', error, info); }
+  render() {
+    if (this.state.error) {
+      return this.props.fallback ?? (
+        <div className="flex flex-col items-center justify-center h-64 gap-3 text-center">
+          <div className="text-danger text-2xl">⚠</div>
+          <p className="text-sm font-medium text-text-primary">Something went wrong on this page.</p>
+          <p className="text-xs text-text-muted font-mono max-w-lg break-all">{this.state.error.message}</p>
+          <button onClick={() => this.setState({ error: null })}
+            className="mt-2 rounded-lg bg-primary/10 px-4 py-2 text-xs text-primary hover:bg-primary/20 transition-colors">
+            Try again
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 // === Card (M3 Surface Container with tonal elevation) ===
 export function Card({ children, className }: { children: ReactNode; className?: string }) {
@@ -321,17 +345,24 @@ export function Toggle({ label, checked, onChange, description }: {
 }
 
 // === Status Dot (M3 with pulse animation for active) ===
-export function StatusDot({ status }: { status: 'active' | 'idle' | 'error' | 'archived' | 'inactive' | string }) {
+export function StatusDot({ status }: { status: 'active' | 'idle' | 'error' | 'archived' | 'inactive' | 'pending' | 'disconnected' | 'expired' | 'bound' | 'revoked' | string }) {
   const colorMap: Record<string, string> = {
-    active: 'bg-success', idle: 'bg-warning', error: 'bg-danger', archived: 'bg-text-muted', inactive: 'bg-text-muted',
+    active: 'bg-success', idle: 'bg-text-muted', error: 'bg-danger', archived: 'bg-text-muted',
+    inactive: 'bg-text-muted', pending: 'bg-info', disconnected: 'bg-warning', expired: 'bg-danger',
+    bound: 'bg-success', revoked: 'bg-danger', completed: 'bg-text-muted',
+  };
+  const labelMap: Record<string, string> = {
+    active: 'Active', idle: 'Idle', bound: 'Bound', pending: 'Pending', expired: 'Expired',
+    disconnected: 'Disconnected', error: 'Error', revoked: 'Revoked', completed: 'Completed',
   };
   return (
     <span className="inline-flex items-center gap-1.5">
       <span className="relative flex h-2 w-2">
         {status === 'active' && <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-40" />}
+        {status === 'pending' && <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-info opacity-40" />}
         <span className={clsx('relative inline-flex h-2 w-2 rounded-full', colorMap[status] || 'bg-text-muted')} />
       </span>
-      <span className="text-sm capitalize">{status}</span>
+      <span className="text-sm">{labelMap[status] || status}</span>
     </span>
   );
 }

@@ -17,14 +17,19 @@ import AgentDetail from './pages/AgentFactory/AgentDetail';
 import SoulEditor from './pages/AgentFactory/SoulEditor';
 import SkillCatalog from './pages/Skills/SkillCatalog';
 import Bindings from './pages/Bindings';
+import IMChannels from './pages/IMChannels';
 import Monitor from './pages/Monitor/index';
 import AuditLog from './pages/AuditLog';
 import Usage from './pages/Usage';
 import Playground from './pages/Playground';
 import Settings from './pages/Settings';
+import SecurityCenter from './pages/SecurityCenter';
 import Approvals from './pages/Approvals';
 import KnowledgeBase from './pages/Knowledge/index';
 import Workspace from './pages/Workspace/index';
+
+// Public pages (no auth required)
+import TwinChat from './pages/TwinChat';
 
 // Portal pages
 import PortalChat from './pages/portal/Chat';
@@ -32,6 +37,7 @@ import PortalProfile from './pages/portal/Profile';
 import PortalMyUsage from './pages/portal/MyUsage';
 import PortalMySkills from './pages/portal/MySkills';
 import PortalMyRequests from './pages/portal/MyRequests';
+import PortalBindIM from './pages/portal/BindIM';
 
 function AppRoutes() {
   const { user, loading } = useAuth();
@@ -57,6 +63,7 @@ function AppRoutes() {
       <Route path="/portal/usage" element={user ? <PortalLayout><PortalMyUsage /></PortalLayout> : <Navigate to="/login" replace />} />
       <Route path="/portal/skills" element={user ? <PortalLayout><PortalMySkills /></PortalLayout> : <Navigate to="/login" replace />} />
       <Route path="/portal/requests" element={user ? <PortalLayout><PortalMyRequests /></PortalLayout> : <Navigate to="/login" replace />} />
+      <Route path="/portal/channels" element={user ? <PortalLayout><PortalBindIM /></PortalLayout> : <Navigate to="/login" replace />} />
 
       {/* Admin/Manager Console */}
       <Route path="/" element={user ? <Navigate to={user.role === 'employee' ? '/portal' : '/dashboard'} replace /> : <Navigate to="/login" replace />} />
@@ -71,14 +78,19 @@ function AppRoutes() {
       <Route path="/skills" element={user && user.role !== 'employee' ? <Layout><SkillCatalog /></Layout> : <Navigate to="/login" replace />} />
       <Route path="/knowledge" element={user && user.role !== 'employee' ? <Layout><KnowledgeBase /></Layout> : <Navigate to="/login" replace />} />
       <Route path="/bindings" element={user && user.role !== 'employee' ? <Layout><Bindings /></Layout> : <Navigate to="/login" replace />} />
+      <Route path="/channels" element={user && user.role !== 'employee' ? <Layout><IMChannels /></Layout> : <Navigate to="/login" replace />} />
       <Route path="/monitor" element={user && user.role !== 'employee' ? <Layout><Monitor /></Layout> : <Navigate to="/login" replace />} />
       <Route path="/audit" element={user && user.role !== 'employee' ? <Layout><AuditLog /></Layout> : <Navigate to="/login" replace />} />
       <Route path="/usage" element={user && user.role !== 'employee' ? <Layout><Usage /></Layout> : <Navigate to="/login" replace />} />
       <Route path="/playground" element={user && user.role !== 'employee' ? <Layout><Playground /></Layout> : <Navigate to="/login" replace />} />
       <Route path="/approvals" element={user && user.role !== 'employee' ? <Layout><Approvals /></Layout> : <Navigate to="/login" replace />} />
+      <Route path="/security" element={user && user.role === 'admin' ? <Layout><SecurityCenter /></Layout> : <Navigate to="/login" replace />} />
       <Route path="/settings" element={user && user.role === 'admin' ? <Layout><Settings /></Layout> : <Navigate to="/login" replace />} />
 
       {/* Catch-all */}
+      {/* Public route — no authentication required */}
+      <Route path="/twin/:token" element={<TwinChat />} />
+
       <Route path="*" element={<Navigate to="/login" replace />} />
     </Routes>
   );

@@ -100,22 +100,26 @@ export default function SessionDetail({ session, onBack }: Props) {
               ))}
               {conversation.length === 0 && (
                 <div className="text-center py-8 text-text-muted">
-                  <MessageSquare size={24} className="mx-auto mb-2" />
-                  <p className="text-sm">Loading conversation...</p>
+                  <MessageSquare size={24} className="mx-auto mb-2 opacity-40" />
+                  <p className="text-sm font-medium">No conversation history available</p>
+                  <p className="text-xs mt-1 max-w-xs mx-auto">
+                    Message-level storage requires a persistent conversation log. Session metadata (turns, tokens, duration) is available in the sidebar.
+                  </p>
                 </div>
               )}
             </div>
 
             {mode === 'takeover' && (
               <div className="mt-4 border-t border-dark-border pt-4">
-                <p className="text-xs text-text-muted mb-2">Agent is paused. In production, messages are delivered via the employee's channel ({session.channel}) in real-time.</p>
-                <div className="flex gap-2">
+                <div className="rounded-lg bg-warning/5 border border-warning/20 px-3 py-2 text-xs text-warning mb-3">
+                  ⚠️ Live takeover requires real-time WebSocket channel integration — planned for v1.1
+                </div>
+                <div className="flex gap-2 opacity-50 pointer-events-none">
                   <input value={takeoverMsg} onChange={e => setTakeoverMsg(e.target.value)}
                     placeholder={`Message to ${session.employeeName}...`}
-                    className="flex-1 rounded-lg border border-dark-border bg-dark-bg px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:border-danger focus:outline-none" />
-                  <Button variant="danger" disabled={!takeoverMsg.trim()}><Send size={16} /></Button>
+                    className="flex-1 rounded-lg border border-dark-border bg-dark-bg px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:border-danger focus:outline-none" disabled />
+                  <Button variant="danger" disabled><Send size={16} /></Button>
                 </div>
-                <p className="text-[10px] text-text-muted mt-1">Requires WebSocket channel integration — see Roadmap v1.1</p>
               </div>
             )}
           </Card>
@@ -148,7 +152,10 @@ export default function SessionDetail({ session, onBack }: Props) {
           </Card>
 
           <Card>
-            <h3 className="text-sm font-semibold text-text-primary mb-3">Quality Metrics</h3>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-text-primary">Quality Metrics</h3>
+              <span className="text-[10px] text-text-muted bg-surface-dim px-2 py-0.5 rounded-full">Estimated</span>
+            </div>
             <div className="space-y-2">
               {[
                 { label: 'Satisfaction', value: quality.satisfaction, max: 5, color: 'bg-success' },

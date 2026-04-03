@@ -1,34 +1,20 @@
 import { useParams, useNavigate } from 'react-router-dom';
 import Chart from 'react-apexcharts';
 import type { ApexOptions } from 'apexcharts';
-import { ArrowLeft, Edit3, Play, Settings, Bot, Star, Zap, Clock, Shield, MessageSquare, TrendingUp, Eye, Loader, FolderOpen } from 'lucide-react';
+import { ArrowLeft, Edit3, MessageSquare, Eye, Loader, FolderOpen } from 'lucide-react';
 import { Card, Badge, Button, PageHeader, StatusDot } from '../../components/ui';
 import { useAgent, useAgents, usePositions, useBindings, useSessions, useAgentDailyUsage } from '../../hooks/useApi';
 import { CHANNEL_LABELS } from '../../types';
 import type { ChannelType } from '../../types';
 
-const qualityRadarOpts: ApexOptions = {
-  chart: { type: 'radar', toolbar: { show: false }, background: 'transparent' },
-  colors: ['#6366f1'],
-  xaxis: { categories: ['Satisfaction', 'Tool Success', 'Response Time', 'Compliance', 'Completion'] },
-  yaxis: { show: false },
-  stroke: { width: 2 },
-  fill: { opacity: 0.2 },
-  markers: { size: 3 },
-  plotOptions: { radar: { polygons: { strokeColors: '#2e3039', connectorColors: '#2e3039', fill: { colors: ['transparent'] } } } },
-  tooltip: { theme: 'dark' },
-  dataLabels: { enabled: false },
-};
-
 const activityOpts: ApexOptions = {
   chart: { type: 'bar', toolbar: { show: false }, background: 'transparent' },
-  colors: ['#6366f1', '#22c55e'],
-  plotOptions: { bar: { borderRadius: 3, columnWidth: '60%' } },
+  colors: ['#6366f1'],
+  plotOptions: { bar: { borderRadius: 3, columnWidth: '55%' } },
   grid: { borderColor: '#2e3039', strokeDashArray: 4 },
-  xaxis: { categories: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'], labels: { style: { colors: '#64748b', fontSize: '11px' } }, axisBorder: { show: false }, axisTicks: { show: false } },
+  xaxis: { labels: { style: { colors: '#64748b', fontSize: '11px' } }, axisBorder: { show: false }, axisTicks: { show: false } },
   yaxis: { labels: { style: { colors: '#64748b', fontSize: '11px' } } },
   tooltip: { theme: 'dark' },
-  legend: { position: 'top', horizontalAlign: 'right', labels: { colors: '#94a3b8' } },
   dataLabels: { enabled: false },
 };
 
@@ -38,7 +24,7 @@ const tokenOpts: ApexOptions = {
   stroke: { curve: 'smooth', width: 2 },
   fill: { type: 'gradient', gradient: { opacityFrom: 0.3, opacityTo: 0.05 } },
   grid: { borderColor: '#2e3039', strokeDashArray: 4 },
-  xaxis: { categories: ['Mar 14', 'Mar 15', 'Mar 16', 'Mar 17', 'Mar 18', 'Mar 19', 'Mar 20'], labels: { style: { colors: '#64748b', fontSize: '11px' } }, axisBorder: { show: false }, axisTicks: { show: false } },
+  xaxis: { labels: { style: { colors: '#64748b', fontSize: '11px' } }, axisBorder: { show: false }, axisTicks: { show: false } },
   yaxis: { labels: { style: { colors: '#64748b', fontSize: '11px' }, formatter: (v: number) => `${(v / 1000).toFixed(0)}k` } },
   tooltip: { theme: 'dark' },
   legend: { position: 'top', horizontalAlign: 'right', labels: { colors: '#94a3b8' } },
@@ -76,7 +62,7 @@ export default function AgentDetail() {
     <div>
       <PageHeader
         title={agent.name}
-        description={`${agent.positionName} · ${agent.employeeName} · Created ${new Date(agent.createdAt).toLocaleDateString()}`}
+        description={`${agent.positionName} · ${agent.employeeName}${agent.createdAt ? ` · Created ${new Date(agent.createdAt).toLocaleDateString()}` : ''}`}
         actions={
           <div className="flex gap-2">
             <Button variant="default" onClick={() => navigate('/agents')}><ArrowLeft size={16} /> Back</Button>
@@ -116,33 +102,41 @@ export default function AgentDetail() {
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3 mb-6">
-        {/* Quality Radar */}
+        {/* Activity Stats */}
         <Card>
-          <h3 className="text-lg font-semibold text-text-primary mb-2">Quality Assessment</h3>
-          <p className="text-sm text-text-secondary mb-2">Five-dimension quality radar</p>
-          <Chart options={qualityRadarOpts} series={[{ name: 'Score', data: [
-            agent.qualityScore ? Math.round(agent.qualityScore * 20) : 80,
-            dailyUsage.length > 0 ? Math.min(100, 80 + dailyUsage.length * 3) : 85,
-            Math.min(100, 70 + (agent.skills?.length || 0) * 3),
-            Math.min(100, 90 + sessions.length),
-            Math.min(100, 85 + bindings.length * 5),
-          ] }]} type="radar" height={260} />
-          <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
-            <div className="flex justify-between rounded bg-dark-bg px-2 py-1"><span className="text-text-muted">Satisfaction</span><span className="text-success">{agent.qualityScore ? `${Math.round(agent.qualityScore * 20)}%` : '—'}</span></div>
-            <div className="flex justify-between rounded bg-dark-bg px-2 py-1"><span className="text-text-muted">Requests/Week</span><span className="text-success">{dailyUsage.reduce((s, d) => s + d.requests, 0)}</span></div>
-            <div className="flex justify-between rounded bg-dark-bg px-2 py-1"><span className="text-text-muted">Skills</span><span className="text-info">{agent.skills?.length || 0}</span></div>
-            <div className="flex justify-between rounded bg-dark-bg px-2 py-1"><span className="text-text-muted">Bindings</span><span className="text-success">{bindings.length}</span></div>
+          <h3 className="text-lg font-semibold text-text-primary mb-4">Activity Summary</h3>
+          <div className="space-y-3">
+            {[
+              { label: 'Requests (7 days)', value: dailyUsage.reduce((s, d) => s + d.requests, 0), color: 'text-primary' },
+              { label: 'Input tokens', value: `${(dailyUsage.reduce((s, d) => s + (d.inputTokens || 0), 0) / 1000).toFixed(1)}k`, color: 'text-info' },
+              { label: 'Output tokens', value: `${(dailyUsage.reduce((s, d) => s + (d.outputTokens || 0), 0) / 1000).toFixed(1)}k`, color: 'text-warning' },
+              { label: 'Est. cost', value: `$${dailyUsage.reduce((s, d) => s + (d.cost || 0), 0).toFixed(4)}`, color: 'text-success' },
+              { label: 'Active sessions', value: sessions.length, color: 'text-success' },
+              { label: 'Bindings', value: bindings.length, color: 'text-text-primary' },
+              { label: 'Skills loaded', value: agent.skills?.length || 0, color: 'text-text-primary' },
+              { label: 'Quality score', value: agent.qualityScore ? `${agent.qualityScore}/5` : '—', color: 'text-warning' },
+            ].map(r => (
+              <div key={r.label} className="flex justify-between rounded-lg bg-dark-bg px-3 py-2">
+                <span className="text-xs text-text-muted">{r.label}</span>
+                <span className={`text-sm font-semibold ${r.color}`}>{r.value}</span>
+              </div>
+            ))}
           </div>
         </Card>
 
-        {/* Weekly Activity */}
+        {/* Daily Conversations */}
         <Card className="lg:col-span-2">
-          <h3 className="text-lg font-semibold text-text-primary mb-2">Weekly Activity</h3>
-          <p className="text-sm text-text-secondary mb-2">Conversations and tool calls this week</p>
-          <Chart options={activityOpts} series={[
-            { name: 'Conversations', data: dailyUsage.map(d => d.requests) },
-            { name: 'Tool Calls', data: dailyUsage.map(d => Math.round(d.requests * 0.6)) },
-          ]} type="bar" height={260} />
+          <h3 className="text-lg font-semibold text-text-primary mb-1">Daily Conversations (7 days)</h3>
+          <p className="text-sm text-text-secondary mb-3">Requests per day from DynamoDB records</p>
+          {dailyUsage.length === 0 ? (
+            <div className="flex items-center justify-center h-48 text-text-muted text-sm">No conversation data yet</div>
+          ) : (
+            <Chart
+              options={{ ...activityOpts, xaxis: { ...activityOpts.xaxis, categories: dailyUsage.map(d => d.date?.slice(5) || '') } }}
+              series={[{ name: 'Conversations', data: dailyUsage.map(d => d.requests) }]}
+              type="bar" height={260}
+            />
+          )}
         </Card>
       </div>
 
@@ -150,10 +144,18 @@ export default function AgentDetail() {
         {/* Token Usage */}
         <Card>
           <h3 className="text-lg font-semibold text-text-primary mb-2">Token Usage (7 days)</h3>
-          <Chart options={tokenOpts} series={[
-            { name: 'Input Tokens', data: dailyUsage.map(d => d.inputTokens) },
-            { name: 'Output Tokens', data: dailyUsage.map(d => d.outputTokens) },
-          ]} type="area" height={240} />
+          {dailyUsage.length === 0 ? (
+            <div className="flex items-center justify-center h-36 text-text-muted text-sm">No token data yet</div>
+          ) : (
+            <Chart
+              options={{ ...tokenOpts, xaxis: { ...tokenOpts.xaxis, categories: dailyUsage.map(d => d.date?.slice(5) || '') } }}
+              series={[
+                { name: 'Input Tokens', data: dailyUsage.map(d => d.inputTokens || 0) },
+                { name: 'Output Tokens', data: dailyUsage.map(d => d.outputTokens || 0) },
+              ]}
+              type="area" height={240}
+            />
+          )}
         </Card>
 
         {/* Configuration Summary */}
@@ -171,9 +173,9 @@ export default function AgentDetail() {
             <div>
               <p className="text-xs text-text-muted mb-1.5">SOUL Versions</p>
               <div className="flex gap-1.5">
-                <Badge>Global v{agent.soulVersions.global}</Badge>
-                <Badge color="primary">Position v{agent.soulVersions.position}</Badge>
-                <Badge color="success">Personal v{agent.soulVersions.personal}</Badge>
+                <Badge>Global v{agent.soulVersions?.global ?? 0}</Badge>
+                <Badge color="primary">Position v{agent.soulVersions?.position ?? 0}</Badge>
+                <Badge color="success">Personal v{agent.soulVersions?.personal ?? 0}</Badge>
               </div>
             </div>
             <div>
@@ -190,7 +192,7 @@ export default function AgentDetail() {
             </div>
             <div>
               <p className="text-xs text-text-muted mb-1">Last Updated</p>
-              <p className="text-sm text-text-secondary">{new Date(agent.updatedAt).toLocaleString()}</p>
+              <p className="text-sm text-text-secondary">{agent.updatedAt ? new Date(agent.updatedAt).toLocaleString() : '—'}</p>
             </div>
           </div>
         </Card>
@@ -207,13 +209,13 @@ export default function AgentDetail() {
                   <div className="h-2.5 w-2.5 rounded-full bg-success animate-pulse" />
                   <div>
                     <p className="text-sm font-medium">{s.employeeName}</p>
-                    <p className="text-xs text-text-muted">{s.lastMessage.slice(0, 60)}...</p>
+                    <p className="text-xs text-text-muted">{(s.lastMessage || '').slice(0, 60)}{s.lastMessage?.length > 60 ? '...' : ''}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-3">
                   <Badge color="info">{CHANNEL_LABELS[s.channel as ChannelType]}</Badge>
                   <span className="text-xs text-text-muted">{s.turns} turns</span>
-                  <Button variant="ghost" size="sm" onClick={() => navigate('/monitor')}><Eye size={14} /></Button>
+                  <Button variant="ghost" size="sm" onClick={() => navigate(`/monitor?session=${s.id}`)}><Eye size={14} /></Button>
                 </div>
               </div>
             ))}

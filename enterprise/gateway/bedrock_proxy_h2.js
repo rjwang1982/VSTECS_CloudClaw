@@ -25,6 +25,7 @@ const crypto = require('node:crypto');
 
 const PORT = parseInt(process.env.PROXY_PORT || '8091');
 const TENANT_ROUTER_URL = process.env.TENANT_ROUTER_URL || 'http://127.0.0.1:8090';
+const ADMIN_CONSOLE_URL = process.env.ADMIN_CONSOLE_URL || 'http://127.0.0.1:8099';
 const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
 const BEDROCK_MODEL_ID = process.env.BEDROCK_MODEL_ID || 'global.amazon.nova-2-lite-v1:0';
 
@@ -33,8 +34,9 @@ const FAST_PATH_ENABLED = process.env.FAST_PATH_ENABLED !== 'false';
 // Tenant state expiry: after this many ms without activity, tenant goes back to cold
 // AgentCore idle timeout is 15 min, so we use 20 min to be safe
 const TENANT_WARM_TTL_MS = parseInt(process.env.TENANT_WARM_TTL_MS || '1200000');
-// Warming timeout: how long to wait for Tenant Router before falling back to fast-path
-const WARMING_TIMEOUT_MS = parseInt(process.env.WARMING_TIMEOUT_MS || '8000');
+// Warming timeout: how long to wait for Tenant Router before falling back to fast-path.
+// AgentCore cold start + SSM lookup + S3 workspace load = 10-15s. Use 25s to be safe.
+const WARMING_TIMEOUT_MS = parseInt(process.env.WARMING_TIMEOUT_MS || '25000');
 
 function log(msg) {
   console.log(`${new Date().toISOString()} [bedrock-proxy-h2] ${msg}`);
@@ -154,13 +156,23 @@ function extractUserMessage(body) {
       const meta = JSON.parse(jsonMatch[1]);
       if (meta.sender_id) {
         userId = meta.sender_id;
-        // Detect channel from metadata or message context
-        if (meta.channel) channel = meta.channel.toLowerCase();
-        else if (userText.includes('Discord')) channel = 'discord';
+        // Detect channel from metadata — skip placeholder values like 'unknown'/'unkn'
+        const metaChannel = (meta.channel || '').toLowerCase();
+        if (metaChannel && metaChannel !== 'unknown' && metaChannel !== 'unkn') {
+          channel = metaChannel;
+        } else if (meta.channel_type) {
+          channel = meta.channel_type.toLowerCase();
+        } else if (userText.includes('Discord')) channel = 'discord';
         else if (userText.includes('Telegram')) channel = 'telegram';
         else if (userText.includes('Slack')) channel = 'slack';
         else if (userText.includes('WhatsApp')) channel = 'whatsapp';
         else if (userText.includes('Feishu') || userText.includes('feishu')) channel = 'feishu';
+        // Heuristic fallback: detect channel by sender_id format when no keyword found
+        // Telegram user IDs are 7-12 digits; Discord IDs are 17-19 digits; WhatsApp uses +phone
+        else if (/^\d{7,12}$/.test(meta.sender_id)) channel = 'telegram';
+        else if (/^\d{17,19}$/.test(meta.sender_id)) channel = 'discord';
+        else if (/^\+\d{7,15}$/.test(meta.sender_id)) channel = 'whatsapp';
+        else if (/^ou_[a-zA-Z0-9]+$/.test(meta.sender_id)) channel = 'feishu'; // Feishu Open User ID
       }
     }
   } catch (e) { /* JSON parse failed, fall through to regex */ }
@@ -172,7 +184,10 @@ function extractUserMessage(body) {
     if (sysJsonMatch && userId === 'unknown') {
       const meta = JSON.parse(sysJsonMatch[1]);
       if (meta.sender_id) userId = meta.sender_id;
-      if (meta.channel) channel = meta.channel.toLowerCase();
+      const sysMetaChannel = (meta.channel || '').toLowerCase();
+      if (sysMetaChannel && sysMetaChannel !== 'unknown' && sysMetaChannel !== 'unkn') {
+        channel = sysMetaChannel;
+      }
     }
     // Also try "label": "pitchshow (1484960930608578580)" format
     if (userId === 'unknown') {
@@ -239,7 +254,21 @@ function forwardToTenantRouter(channel, userId, message) {
         try {
           const result = JSON.parse(data);
           const agentResult = result.response || {};
-          const text = (typeof agentResult === 'object' ? agentResult.response : agentResult) || 'No response';
+          let text = (typeof agentResult === 'object' ? agentResult.response : agentResult) || 'No response';
+          // Handle V29+ Gateway mode: server.py may return raw Python dict str or nested result
+          if (typeof text === 'string' && (text.includes("'runId'") || text.includes('"runId"'))) {
+            try {
+              const parsed = JSON.parse(text.replace(/'/g, '"'));
+              const payloads = (parsed.result || parsed).payloads || [];
+              if (payloads[0] && payloads[0].text) text = payloads[0].text;
+            } catch(e) {
+              const m = text.match(/'text':\s*'((?:[^'\\]|\\.)*)'/);
+              if (m) text = m[1].replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+            }
+          } else if (typeof agentResult === 'object' && agentResult.result) {
+            const payloads = (agentResult.result.payloads || []);
+            if (payloads[0] && payloads[0].text) text = payloads[0].text;
+          }
           resolve(String(text));
         } catch (e) {
           resolve(data || 'Parse error');
@@ -492,6 +521,67 @@ server.on('stream', (stream, headers) => {
       log(`DEBUG-MSG: ${userText.slice(0,300)}`);
       log(`Request: ${path} channel=${channel} user=${userId} msg=${userText.slice(0, 60)}`);
 
+      // =====================================================================
+      // PATH B: Admin Assistant bypass — proxy directly to real Bedrock
+      // Admin sessions should NOT go through Tenant Router → AgentCore.
+      // Instead, forward the original Bedrock request to the real endpoint.
+      // This preserves OpenClaw's full system prompt (SOUL.md) and tool defs.
+      // =====================================================================
+      const sessionId = parsed.system?.map(s => typeof s === 'string' ? s : s.text || '').join(' ') || '';
+      const isAdmin = (userId === 'admin'); // Only admin console sessions use userId='admin'; Discord SOUL content must not trigger PATH B
+
+      if (isAdmin) {
+        log(`PATH B: Admin bypass — proxying to real Bedrock (skip Tenant Router)`);
+        try {
+          const client = await initBedrockClient();
+          if (client) {
+            // Extract model ID from the URL path
+            const modelMatch = path.match(/model\/([^/]+)/);
+            const modelId = modelMatch ? decodeURIComponent(modelMatch[1]) : BEDROCK_MODEL_ID;
+
+            const cmd = new client._ConverseCommand({
+              modelId,
+              messages: parsed.messages || [],
+              system: parsed.system || [],
+              inferenceConfig: parsed.inferenceConfig || { maxTokens: 4096 },
+              toolConfig: parsed.toolConfig || undefined,
+            });
+            const resp = await client.send(cmd);
+            const content = resp.output?.message?.content || [];
+
+            if (isStream) {
+              // Build event stream from response
+              const texts = content.filter(c => c.text).map(c => c.text);
+              const toolUses = content.filter(c => c.toolUse);
+              // For streaming, send text + tool use blocks
+              const fullResp = JSON.stringify({
+                output: resp.output,
+                stopReason: resp.stopReason,
+                usage: resp.usage,
+              });
+              stream.respond({ ':status': 200, 'content-type': 'application/vnd.amazon.eventstream' });
+              for (const e of buildEventStream(texts.join('\n') || JSON.stringify(content))) stream.write(e);
+              stream.end();
+            } else {
+              stream.respond({ ':status': 200, 'content-type': 'application/json' });
+              stream.end(JSON.stringify({
+                output: resp.output,
+                stopReason: resp.stopReason,
+                usage: resp.usage,
+                metrics: { latencyMs: 0 },
+              }));
+            }
+            return;
+          }
+        } catch (adminErr) {
+          log(`Admin bypass error: ${adminErr.message}, falling through to normal routing`);
+        }
+      }
+
+      // =====================================================================
+      // PATH A: Employee agents — route through Tenant Router → AgentCore
+      // =====================================================================
+
       if (!userText) {
         const noMsg = "I didn't receive a message.";
         if (isStream) {
@@ -503,6 +593,62 @@ server.on('stream', (stream, headers) => {
           stream.end(JSON.stringify(buildConverseResponse(noMsg)));
         }
         return;
+      }
+
+      // =====================================================================
+      // PATH C: IM Self-Service Pairing — intercept /start TOKEN commands
+      // When an employee scans the Portal QR code, Telegram sends "/start TOKEN".
+      // We validate the token against Admin Console and write the SSM mapping
+      // WITHOUT invoking AgentCore — fast, free, no microVM spin-up.
+      //
+      // Safety: only intercepts exact pattern /start [A-Z0-9]{10,16}
+      // On any error (invalid token, network, etc.) → falls through to normal routing
+      // =====================================================================
+      // Search anywhere in userText — the /start TOKEN appears after OpenClaw's metadata blocks
+      const pairMatch = userText.match(/\/start\s+([A-Za-z0-9]{10,16})/);
+      if (pairMatch && userId !== 'unknown' && channel !== 'unknown') {
+        const token = pairMatch[1].toUpperCase();
+        try {
+          const http = require('node:http');
+          const pairResult = await new Promise((resolve, reject) => {
+            const payload = JSON.stringify({ channel, channelUserId: userId, token });
+            const req = http.request({
+              hostname: '127.0.0.1', port: 8099, path: '/api/v1/bindings/pair-complete',
+              method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+            }, (res) => {
+              let data = '';
+              res.on('data', c => data += c);
+              res.on('end', () => {
+                try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+                catch { resolve({ status: res.statusCode, body: {} }); }
+              });
+            });
+            req.on('error', reject);
+            req.setTimeout(5000, () => { req.destroy(); reject(new Error('pair-complete timeout')); });
+            req.write(payload);
+            req.end();
+          });
+
+          if (pairResult.status === 200 && pairResult.body.success) {
+            const { employeeName, positionName } = pairResult.body;
+            const confirmMsg = `✅ Connected! Hi ${employeeName} — your ${positionName || 'AI'} Agent is ready. Just send me a message to get started!`;
+            log(`PATH C: Pairing complete ${channel} ${userId} → ${pairResult.body.employeeId}`);
+            if (isStream) {
+              stream.respond({ ':status': 200, 'content-type': 'application/vnd.amazon.eventstream' });
+              for (const e of buildEventStream(confirmMsg)) stream.write(e);
+              stream.end();
+            } else {
+              stream.respond({ ':status': 200, 'content-type': 'application/json' });
+              stream.end(JSON.stringify(buildConverseResponse(confirmMsg)));
+            }
+            return; // ← pairing handled, do NOT route to AgentCore
+          }
+          // Token invalid/expired — fall through to normal routing with a hint
+          log(`PATH C: Pairing token invalid/expired for ${userId}, routing normally`);
+        } catch (pairErr) {
+          log(`PATH C: Pairing error (falling through): ${pairErr.message}`);
+          // Fall through to normal routing — employee gets regular agent response
+        }
       }
 
       // Core routing: fast-path for cold tenants, full pipeline for warm

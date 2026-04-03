@@ -33,6 +33,63 @@ AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 RUNTIME_ID = os.environ.get("AGENTCORE_RUNTIME_ID", "")
 ROUTER_PORT = int(os.environ.get("ROUTER_PORT", "8090"))
 
+# Per-tenant runtime override cache (TTL 5 min to avoid SSM call every message)
+_runtime_cache: dict = {}
+_runtime_cache_ts: dict = {}
+_RUNTIME_CACHE_TTL = 300  # seconds
+
+
+def _get_runtime_id_for_tenant(base_id: str) -> str:
+    """Resolve runtime ID for a tenant using a 3-tier fallback chain:
+
+    1. Employee-level  SSM /tenants/{emp_id}/runtime-id      (explicit per-employee)
+    2. Position-level  SSM /positions/{pos_id}/runtime-id    (set per position in Admin Console)
+    3. Default runtime AGENTCORE_RUNTIME_ID env var
+
+    Position is read from SSM /tenants/{emp_id}/position (written at onboarding).
+    All lookups are cached for 5 minutes to minimise SSM API calls.
+    """
+    now = time.time()
+    cache_key = f"runtime__{base_id}"
+    if cache_key in _runtime_cache and now - _runtime_cache_ts.get(cache_key, 0) < _RUNTIME_CACHE_TTL:
+        return _runtime_cache[cache_key]
+
+    ssm = boto3.client("ssm", region_name=AWS_REGION)
+
+    # Tier 1: explicit per-employee override
+    try:
+        resp = ssm.get_parameter(Name=f"/openclaw/{STACK_NAME}/tenants/{base_id}/runtime-id")
+        runtime = resp["Parameter"]["Value"]
+        _runtime_cache[cache_key] = runtime
+        _runtime_cache_ts[cache_key] = now
+        logger.info("Runtime (employee override) %s → %s", base_id, runtime)
+        return runtime
+    except Exception:
+        pass
+
+    # Tier 2: position-level runtime
+    try:
+        pos_resp = ssm.get_parameter(Name=f"/openclaw/{STACK_NAME}/tenants/{base_id}/position")
+        pos_id = pos_resp["Parameter"]["Value"]
+        pos_cache_key = f"runtime__pos__{pos_id}"
+        if pos_cache_key in _runtime_cache and now - _runtime_cache_ts.get(pos_cache_key, 0) < _RUNTIME_CACHE_TTL:
+            runtime = _runtime_cache[pos_cache_key]
+        else:
+            rt_resp = ssm.get_parameter(Name=f"/openclaw/{STACK_NAME}/positions/{pos_id}/runtime-id")
+            runtime = rt_resp["Parameter"]["Value"]
+            _runtime_cache[pos_cache_key] = runtime
+            _runtime_cache_ts[pos_cache_key] = now
+        _runtime_cache[cache_key] = runtime
+        _runtime_cache_ts[cache_key] = now
+        logger.info("Runtime (position %s) %s → %s", pos_id, base_id, runtime)
+        return runtime
+    except Exception:
+        pass
+
+    # Tier 3: default runtime
+    logger.info("Runtime (default) %s → %s", base_id, RUNTIME_ID)
+    return RUNTIME_ID
+
 # Tenant ID validation: alphanumeric, underscores, hyphens, dots
 _TENANT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_.\-]{1,128}$")
 
@@ -70,7 +127,8 @@ def derive_tenant_id(channel: str, user_id: str) -> str:
 
     # Hash suffix ensures minimum 33 chars for AgentCore runtimeSessionId
     # 19 hex chars ensures even short channel+user combos reach 33+ chars
-    hash_suffix = hashlib.sha256(f"{channel}:{user_id}".encode()).hexdigest()[:19]
+    from datetime import date as _d
+    hash_suffix = hashlib.sha256(f"{channel}:{user_id}:{_d.today().strftime('%Y%m%d')}".encode()).hexdigest()[:19]
     tenant_id = f"{channel_short}__{sanitized}__{hash_suffix}"
 
     # Pad to 33 chars minimum if still too short
@@ -127,13 +185,18 @@ def invoke_agent_runtime(
         return _invoke_local_container(local_url, tenant_id, message, model)
 
     # Production mode: call AgentCore Runtime API
-    if not RUNTIME_ID:
+    # Check for per-tenant runtime override (e.g. Executive Runtime for pos-exec)
+    parts = tenant_id.split("__")
+    base_id = parts[1] if len(parts) >= 2 else tenant_id
+    effective_runtime = _get_runtime_id_for_tenant(base_id) or RUNTIME_ID
+
+    if not effective_runtime:
         raise RuntimeError(
             "AGENTCORE_RUNTIME_ID not configured. "
             "Set it in SSM or environment after creating the AgentCore Runtime."
         )
 
-    return _invoke_agentcore(tenant_id, message, model)
+    return _invoke_agentcore(tenant_id, message, model, runtime_id_override=effective_runtime)
 
 
 def _invoke_local_container(
@@ -176,8 +239,10 @@ def _invoke_local_container(
         raise RuntimeError(f"Agent Container not reachable at {base_url}: {e}") from e
 
 
-def _invoke_agentcore(tenant_id: str, message: str, model: Optional[str]) -> dict:
-    """Call AgentCore Runtime API (production mode)."""
+def _invoke_agentcore(tenant_id: str, message: str, model: Optional[str],
+                      runtime_id_override: Optional[str] = None) -> dict:
+    """Call AgentCore Runtime API (production mode).
+    runtime_id_override allows routing to a different runtime (e.g. Executive Runtime)."""
     import json as _json
 
     payload = {
@@ -187,14 +252,16 @@ def _invoke_agentcore(tenant_id: str, message: str, model: Optional[str]) -> dic
     if model:
         payload["model"] = model
 
+    effective_runtime_id = runtime_id_override or RUNTIME_ID
+
     # Get the Runtime ARN — construct from known pattern to avoid needing control plane permissions
-    runtime_arn = os.environ.get("AGENTCORE_RUNTIME_ARN", "")
+    runtime_arn = os.environ.get("AGENTCORE_RUNTIME_ARN", "") if not runtime_id_override else ""
     if not runtime_arn:
         # Construct ARN from runtime ID + region + account
         try:
             sts = boto3.client("sts", region_name=AWS_REGION)
             account_id = sts.get_caller_identity()["Account"]
-            runtime_arn = f"arn:aws:bedrock-agentcore:{AWS_REGION}:{account_id}:runtime/{RUNTIME_ID}"
+            runtime_arn = f"arn:aws:bedrock-agentcore:{AWS_REGION}:{account_id}:runtime/{effective_runtime_id}"
             logger.info("Constructed runtime ARN: %s", runtime_arn)
         except Exception as e:
             logger.error("Could not construct runtime ARN: %s", e)
@@ -235,6 +302,56 @@ def _invoke_agentcore(tenant_id: str, message: str, model: Optional[str]) -> dic
             tenant_id, error_code, error_msg, duration_ms,
         )
         raise RuntimeError(f"AgentCore invocation failed: {error_code}: {error_msg}") from e
+
+
+# ---------------------------------------------------------------------------
+# Always-on Docker container routing (Shared / Team Agents)
+# ---------------------------------------------------------------------------
+
+# Cache: agent_id → endpoint URL (http://localhost:PORT)
+_always_on_cache: dict = {}
+_always_on_cache_ts: dict = {}
+_ALWAYS_ON_TTL = 60  # seconds
+
+def _get_always_on_endpoint(user_id: str, channel: str) -> str:
+    """Return the localhost endpoint of an always-on container for this user/agent,
+    or empty string if the user should use AgentCore (normal path).
+
+    Always-on containers are registered in SSM:
+      /openclaw/{stack}/always-on/{agent_id}/endpoint = "http://localhost:PORT"
+    and linked to employees:
+      /openclaw/{stack}/tenants/{emp_id}/always-on-agent = "agent-helpdesk"
+    """
+    now = time.time()
+    cache_key = f"always_on__{user_id}"
+    if cache_key in _always_on_cache and now - _always_on_cache_ts.get(cache_key, 0) < _ALWAYS_ON_TTL:
+        return _always_on_cache[cache_key]
+
+    try:
+        ssm = boto3.client("ssm", region_name=AWS_REGION)
+        # Check if this employee is assigned an always-on agent
+        try:
+            r = ssm.get_parameter(Name=f"/openclaw/{STACK_NAME}/tenants/{user_id}/always-on-agent")
+            agent_id = r["Parameter"]["Value"]
+        except Exception:
+            _always_on_cache[cache_key] = ""
+            _always_on_cache_ts[cache_key] = now
+            return ""
+
+        # Get the container endpoint for this always-on agent
+        try:
+            r2 = ssm.get_parameter(Name=f"/openclaw/{STACK_NAME}/always-on/{agent_id}/endpoint")
+            endpoint = r2["Parameter"]["Value"]
+            _always_on_cache[cache_key] = endpoint
+            _always_on_cache_ts[cache_key] = now
+            logger.info("Always-on routing: %s → %s (%s)", user_id, agent_id, endpoint)
+            return endpoint
+        except Exception:
+            _always_on_cache[cache_key] = ""
+            _always_on_cache_ts[cache_key] = now
+            return ""
+    except Exception:
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -298,11 +415,16 @@ class TenantRouterHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            result = invoke_agent_runtime(
-                tenant_id=tenant_id,
-                message=message,
-                model=payload.get("model"),
-            )
+            # Check if this routes to an always-on Docker container
+            always_on_url = _get_always_on_endpoint(user_id, channel)
+            if always_on_url:
+                result = _invoke_local_container(always_on_url, tenant_id, message, payload.get("model"))
+            else:
+                result = invoke_agent_runtime(
+                    tenant_id=tenant_id,
+                    message=message,
+                    model=payload.get("model"),
+                )
             self._respond(200, {
                 "tenant_id": tenant_id,
                 "response": result,

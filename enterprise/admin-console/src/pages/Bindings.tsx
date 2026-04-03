@@ -1,9 +1,72 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { Link2, Plus, Users, User, GitBranch, Smartphone, Trash2 } from 'lucide-react';
+import { IM_ICONS } from '../components/IMIcons';
 import { Card, StatCard, Badge, Button, PageHeader, Table, Modal, Select, Tabs, StatusDot } from '../components/ui';
 import { useBindings, useEmployees, useAgents, usePositions, useCreateBinding, useBulkProvision, useRoutingRules, useUserMappings, useCreateUserMapping, useDeleteUserMapping, useApprovePairing } from '../hooks/useApi';
 import { CHANNEL_LABELS } from '../types';
 import type { Binding, ChannelType } from '../types';
+
+// Inline component for IM mapping table with per-row confirm-to-revoke
+function RevokeTable({ mappings, employees, onRevoke, isPending }: {
+  mappings: any[];
+  employees: any[];
+  onRevoke: (r: any) => void;
+  isPending: boolean;
+}) {
+  const [confirming, setConfirming] = useState<string | null>(null);
+
+  const key = useCallback((r: any) => `${r.channel}__${r.channelUserId}`, []);
+
+  const ChannelIcon = ({ channel }: { channel: string }) => {
+    const Icon = IM_ICONS[channel];
+    return Icon ? <Icon size={22} /> : <Smartphone size={22} className="text-text-muted" />;
+  };
+
+  return (
+    <div className="space-y-2">
+      {mappings.map(r => {
+        const emp = employees.find((e: any) => e.id === r.employeeId);
+        const rKey = key(r);
+        const isConfirming = confirming === rKey;
+        return (
+          <div key={rKey} className="flex items-center gap-3 rounded-lg bg-dark-bg border border-dark-border/40 px-4 py-2.5">
+            <ChannelIcon channel={r.channel} />
+            <Badge color="info" >{r.channel}</Badge>
+            <code className="text-xs text-text-secondary bg-dark-hover px-2 py-0.5 rounded flex-shrink-0">
+              {r.channelUserId}
+            </code>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-text-primary truncate">
+                {emp?.name || r.employeeId}
+              </p>
+              {emp && <p className="text-xs text-text-muted truncate">{emp.positionName}</p>}
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              {isConfirming ? (
+                <>
+                  <span className="text-xs text-danger">Revoke access?</span>
+                  <Button variant="danger" size="sm" disabled={isPending}
+                    onClick={() => { onRevoke(r); setConfirming(null); }}>
+                    Confirm
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={() => setConfirming(null)}>
+                    Cancel
+                  </Button>
+                </>
+              ) : (
+                <Button variant="ghost" size="sm"
+                  className="text-text-muted hover:text-danger hover:border-danger/30"
+                  onClick={() => setConfirming(rKey)}>
+                  <Trash2 size={13} /> Revoke
+                </Button>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 export default function Bindings() {
   const { data: BINDINGS = [] } = useBindings();
@@ -27,6 +90,7 @@ export default function Bindings() {
   const [pairChannel, setPairChannel] = useState('discord');
   const [pairCode, setPairCode] = useState('');
   const [pairUserId, setPairUserId] = useState('');
+  const [pairUsername, setPairUsername] = useState('');
   const [pairEmpId, setPairEmpId] = useState('');
   const [pairResult, setPairResult] = useState<string | null>(null);
   const [bulkPos, setBulkPos] = useState('');
@@ -83,7 +147,7 @@ export default function Bindings() {
         <StatCard title="Total Bindings" value={BINDINGS.length} icon={<Link2 size={22} />} color="primary" />
         <StatCard title="1:1 Private" value={oneToOne.length} icon={<User size={22} />} color="success" />
         <StatCard title="N:1 Shared" value={shared.length} icon={<Users size={22} />} color="info" />
-        <StatCard title="Active" value={BINDINGS.filter(b => b.status === 'active').length} icon={<Link2 size={22} />} color="cyan" />
+        <StatCard title="Bound" value={BINDINGS.filter(b => b.status === 'bound' || b.status === 'active').length} icon={<Link2 size={22} />} color="cyan" />
       </div>
 
       <Card>
@@ -139,20 +203,11 @@ export default function Bindings() {
                   <p className="text-xs mt-1">Add mappings so the system knows which employee is behind each IM account.</p>
                 </div>
               ) : (
-                <Table
-                  columns={[
-                    { key: 'channel', label: 'Channel', render: (r: typeof userMappings[0]) => <Badge color="info">{r.channel}</Badge> },
-                    { key: 'channelUserId', label: 'Platform User ID', render: (r: typeof userMappings[0]) => <code className="text-xs bg-dark-bg px-2 py-0.5 rounded">{r.channelUserId}</code> },
-                    { key: 'employeeId', label: 'Employee', render: (r: typeof userMappings[0]) => {
-                      const emp = EMPLOYEES.find(e => e.id === r.employeeId);
-                      return <span className="font-medium">{emp?.name || r.employeeId}</span>;
-                    }},
-                    { key: 'actions', label: '', render: (r: typeof userMappings[0]) => (
-                      <button onClick={() => deleteUserMapping.mutate({ channel: r.channel, channelUserId: r.channelUserId })}
-                        className="text-text-muted hover:text-danger transition-colors"><Trash2 size={14} /></button>
-                    )},
-                  ]}
-                  data={userMappings}
+                <RevokeTable
+                  mappings={userMappings}
+                  employees={EMPLOYEES}
+                  onRevoke={(r) => deleteUserMapping.mutate({ channel: r.channel, channelUserId: r.channelUserId })}
+                  isPending={deleteUserMapping.isPending}
                 />
               )}
             </div>
@@ -172,7 +227,7 @@ export default function Bindings() {
               employeeId: selEmp, employeeName: emp?.name || '',
               agentId: selAgent, agentName: agent?.name || '',
               mode: selMode as '1:1' | 'N:1' | '1:N', channel: selChannel as any,
-              status: 'active', createdAt: new Date().toISOString(),
+              status: 'bound', createdAt: new Date().toISOString(),
             });
           }
           setShowCreate(false); setSelEmp(''); setSelAgent(''); setSelChannel('');
@@ -328,7 +383,7 @@ export default function Bindings() {
 
       {/* Pairing Approve Modal */}
       <Modal
-        open={showPairing} onClose={() => { setShowPairing(false); setPairCode(''); setPairUserId(''); setPairEmpId(''); setPairResult(null); }}
+        open={showPairing} onClose={() => { setShowPairing(false); setPairCode(''); setPairUserId(''); setPairUsername(''); setPairEmpId(''); setPairResult(null); }}
         title="Approve IM Pairing"
         footer={<div className="flex justify-end gap-3">
           <Button variant="default" onClick={() => { setShowPairing(false); setPairResult(null); }}>
@@ -336,7 +391,7 @@ export default function Bindings() {
           </Button>
           {!pairResult && (
             <Button variant="primary" disabled={!pairCode || !pairEmpId || approvePairing.isPending} onClick={() => {
-              approvePairing.mutate({ channel: pairChannel, pairingCode: pairCode, employeeId: pairEmpId, channelUserId: pairUserId }, {
+              approvePairing.mutate({ channel: pairChannel, pairingCode: pairCode, employeeId: pairEmpId, channelUserId: pairUserId, pairingUserId: pairUsername }, {
                 onSuccess: (data) => {
                   if (data.approved) {
                     setPairResult(`✅ Approved! ${data.output || ''} ${data.mappingWritten ? '+ SSM mapping written' : ''}`);
@@ -371,11 +426,18 @@ export default function Bindings() {
                 className="w-full rounded-lg border border-dark-border bg-dark-bg px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:border-primary focus:outline-none font-mono tracking-wider" />
             </div>
             <div>
-              <label className="block text-xs font-medium text-text-secondary mb-1">Platform User ID (from pairing message)</label>
+              <label className="block text-xs font-medium text-text-secondary mb-1">Platform User ID (numeric, from pairing message)</label>
               <input value={pairUserId} onChange={e => setPairUserId(e.target.value)}
                 placeholder="e.g. 1460888812426363004"
                 className="w-full rounded-lg border border-dark-border bg-dark-bg px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:border-primary focus:outline-none font-mono" />
-              <p className="text-xs text-text-muted mt-1">The "Your user id" shown in the pairing message. Used to map this IM account to the employee.</p>
+              <p className="text-xs text-text-muted mt-1">The numeric "Your user id" from the pairing message.</p>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-text-secondary mb-1">Username / Handle (optional)</label>
+              <input value={pairUsername} onChange={e => setPairUsername(e.target.value)}
+                placeholder="e.g. wujiade4444"
+                className="w-full rounded-lg border border-dark-border bg-dark-bg px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:border-primary focus:outline-none font-mono" />
+              <p className="text-xs text-text-muted mt-1">Discord username shown in pairing message meta. Creates additional SSM mappings for reliable routing.</p>
             </div>
             <Select label="Employee" value={pairEmpId} onChange={setPairEmpId}
               options={EMPLOYEES.map(e => ({ label: `${e.name} (${e.positionName})`, value: e.id }))}

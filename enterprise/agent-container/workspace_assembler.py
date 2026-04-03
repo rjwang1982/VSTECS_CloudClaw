@@ -62,9 +62,10 @@ def get_tenant_position(ssm, stack_name: str, tenant_id: str) -> str:
     if len(parts) >= 3:
         # Format: channel__user_id__hash — extract user_id
         base_id = parts[1]
-    elif len(parts) == 2 and len(parts[1]) > 10:
-        # Format: user_id__hash — strip hash
-        base_id = parts[0]
+    elif len(parts) == 2:
+        # Format: channel__user_id (e.g. personal__emp-dickson, portal__emp-jiade)
+        # Take the second part (user_id), not the first (channel prefix)
+        base_id = parts[1]
 
     if base_id != tenant_id:
         try:
@@ -148,17 +149,27 @@ def assemble_workspace(
         logger.info("Position layer (%s): SOUL=%d AGENTS=%d chars",
                     pos_id, len(position_soul), len(position_agents))
 
-    # 4. Read personal layer (already in workspace from s3 sync)
+    # 4. Read personal layer (employee's own preferences only).
+    # Use .personal_soul_backup.md if it exists — this is the employee's raw personal
+    # layer, saved before the first assembly. Without this, subsequent assemblies would
+    # read the already-merged SOUL.md (which includes global + position + KB blocks)
+    # as the personal layer, causing a snowball: SOUL.md grows unboundedly across sessions.
     personal_soul_path = os.path.join(workspace, "SOUL.md")
+    backup_path = os.path.join(workspace, ".personal_soul_backup.md")
     personal_soul = ""
-    if os.path.isfile(personal_soul_path):
+
+    if os.path.isfile(backup_path):
+        # Backup exists = workspace has been assembled before; use the original personal layer
+        with open(backup_path) as f:
+            personal_soul = f.read()
+        logger.info("Personal layer (from backup): SOUL=%d chars", len(personal_soul))
+    elif os.path.isfile(personal_soul_path):
         with open(personal_soul_path) as f:
             personal_soul = f.read()
-        # Back up personal SOUL before overwriting with merged version
-        backup_path = os.path.join(workspace, ".personal_soul_backup.md")
+        # Save backup so future assemblies use the original personal preferences
         with open(backup_path, "w") as f:
             f.write(personal_soul)
-        logger.info("Personal layer: SOUL=%d chars (backed up)", len(personal_soul))
+        logger.info("Personal layer: SOUL=%d chars (backup created)", len(personal_soul))
 
     # 5. Merge and write
     merged_soul = merge_soul(global_soul, position_soul, personal_soul)
@@ -201,7 +212,47 @@ def assemble_workspace(
         except ClientError:
             pass
 
-    # 7. Generate IDENTITY.md if not present
+    # 7. Generate CHANNELS.md — IM channel bindings for outbound notification delivery.
+    # The heartbeat/cron system needs this to know where to send reminders.
+    # Written here (at assembly time) so always-on containers have it from cold start,
+    # before the first user message arrives.
+    channels_path = os.path.join(workspace, "CHANNELS.md")
+    try:
+        # Extract base employee ID the same way server.py does
+        base_id = tenant_id
+        parts = tenant_id.split("__")
+        if len(parts) >= 3:
+            base_id = parts[1]
+        elif len(parts) == 2:
+            base_id = parts[1]
+
+        prefix = f"/openclaw/{stack_name}/user-mapping/"
+        paginator = ssm_client.get_paginator("get_parameters_by_path")
+        channel_lines = []
+        for page in paginator.paginate(Path=prefix, Recursive=True):
+            for p in page.get("Parameters", []):
+                if p.get("Value") == base_id:
+                    key = p["Name"].replace(prefix, "")
+                    if "__" in key:
+                        ch, uid = key.split("__", 1)
+                        channel_lines.append(f"- **{ch}**: {uid}")
+        if channel_lines:
+            content = (
+                "# Notification Channels\n\n"
+                "When sending reminders or proactive notifications, use these channels:\n\n"
+                + "\n".join(channel_lines)
+                + "\n\nPrefer the first available channel in the list above.\n"
+                "For portal/webchat sessions, fall back to the IM channel listed here.\n"
+            )
+            with open(channels_path, "w") as f:
+                f.write(content)
+            logger.info("CHANNELS.md written: %s", channel_lines)
+        else:
+            logger.info("CHANNELS.md skipped: no IM pairings found for %s", base_id)
+    except Exception as e:
+        logger.warning("CHANNELS.md generation failed (non-fatal): %s", e)
+
+    # 9. Generate IDENTITY.md if not present
     identity_path = os.path.join(workspace, "IDENTITY.md")
     if not os.path.isfile(identity_path):
         identity = f"# Agent Identity\n\n- **Position:** {pos_id}\n- **Tenant:** {tenant_id}\n- **Company:** ACME Corp\n- **Platform:** OpenClaw Enterprise\n"

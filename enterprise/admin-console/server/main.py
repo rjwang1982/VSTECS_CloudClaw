@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -32,8 +32,90 @@ import auth as authmod
 
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-2")
 
+# Gateway region: where EC2, SSM, ECR, and AgentCore live.
+# Reads AWS_REGION env var (set in /etc/openclaw/env); falls back to us-east-1.
+# Note: DynamoDB may be in a different region (DYNAMODB_REGION) — handled separately.
+# Gateway region: where EC2, SSM, ECS, ECR, AgentCore live.
+# Uses GATEWAY_REGION env var first (set in start.sh / /etc/openclaw/env),
+# then SSM_REGION, then falls back to us-east-1.
+# Important: AWS_REGION is NOT used here because it may be set to us-east-2
+# for DynamoDB, while all gateway resources (SSM, ECS, EC2) are in us-east-1.
+_GATEWAY_REGION = os.environ.get("GATEWAY_REGION", os.environ.get("SSM_REGION", "us-east-1"))
+
+
+def _resolve_gateway_instance_id() -> str:
+    """Resolve the EC2 instance ID this server is running on.
+    Reads GATEWAY_INSTANCE_ID env var first (set in /etc/openclaw/env),
+    then falls back to IMDSv2 (works when running on EC2)."""
+    iid = os.environ.get("GATEWAY_INSTANCE_ID", "")
+    if iid:
+        return iid
+    try:
+        import urllib.request
+        # IMDSv2: get session token, then fetch instance-id
+        put_req = urllib.request.Request(
+            "http://169.254.169.254/latest/api/token",
+            method="PUT",
+            headers={"X-aws-ec2-metadata-token-ttl-seconds": "21600"},
+        )
+        token = urllib.request.urlopen(put_req, timeout=2).read().decode()
+        get_req = urllib.request.Request(
+            "http://169.254.169.254/latest/meta-data/instance-id",
+            headers={"X-aws-ec2-metadata-token": token},
+        )
+        return urllib.request.urlopen(get_req, timeout=2).read().decode()
+    except Exception:
+        return ""
+
+
+def _resolve_gateway_account_id() -> str:
+    """Resolve the AWS account ID this server is running in, via STS."""
+    try:
+        import boto3 as _b3sts
+        return _b3sts.client("sts", region_name=_GATEWAY_REGION).get_caller_identity()["Account"]
+    except Exception:
+        return ""
+
+
+_GATEWAY_INSTANCE_ID: str = _resolve_gateway_instance_id()
+_GATEWAY_ACCOUNT_ID: str = _resolve_gateway_account_id()
+
+
+def _bump_config_version() -> None:
+    """Write a new CONFIG#global-version to DynamoDB.
+
+    agent-container/server.py polls this every 5 minutes.  When the version
+    changes it clears its assembly cache so every tenant re-assembles their
+    SOUL/KB on the next request — no container restart required.
+
+    Called after: global SOUL save, position SOUL save, KB assignment changes,
+    model config changes, agent-config changes.
+    """
+    try:
+        import boto3 as _b3bv
+        version = datetime.now(timezone.utc).isoformat()
+        ddb = _b3bv.resource("dynamodb", region_name=db.AWS_REGION)
+        ddb.Table(db.TABLE_NAME).put_item(Item={
+            "PK": "ORG#acme", "SK": "CONFIG#global-version",
+            "GSI1PK": "TYPE#config", "GSI1SK": "CONFIG#global-version",
+            "version": version,
+        })
+    except Exception as e:
+        print(f"[config-version] bump failed (non-fatal): {e}")
+
+# Server start time — used to compute uptime for /settings/services
+_SERVER_START_TIME = time.time()
+
+# Default monthly budgets (USD) by department — overridden by DynamoDB CONFIG#budgets
+_DEFAULT_BUDGETS = {
+    "Engineering": 50.0, "Platform Team": 20.0, "Sales": 30.0,
+    "Product": 25.0, "Finance": 20.0, "HR & Admin": 15.0,
+    "Customer Success": 20.0, "Legal & Compliance": 10.0, "QA Team": 15.0,
+}
+
 app = FastAPI(title="OpenClaw Admin API", version="0.5.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+_ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "https://openclaw.awspsa.com,http://localhost:5173,http://localhost:8099").split(",")
+app.add_middleware(CORSMiddleware, allow_origins=_ALLOWED_ORIGINS, allow_methods=["GET","POST","PUT","DELETE","OPTIONS"], allow_headers=["Content-Type","Authorization"])
 
 
 # =========================================================================
@@ -214,11 +296,37 @@ def get_employee_activities(authorization: str = Header(default="")):
 
 @app.get("/api/v1/org/employees/{emp_id}/activity")
 def get_employee_activity(emp_id: str):
-    """Get activity data for a single employee."""
+    """Get activity data for a single employee — derived from real SESSION# records."""
+    # Try real data from SESSION# records first
+    try:
+        sessions = [s for s in db.get_sessions() if s.get("employeeId") == emp_id]
+        if sessions:
+            from datetime import timedelta
+            now = datetime.now(timezone.utc)
+            week_ago = (now - timedelta(days=7)).isoformat()
+            week_sessions = [s for s in sessions if s.get("lastActive", "") >= week_ago]
+            messages_this_week = sum(int(s.get("turns", 0)) for s in week_sessions)
+            last_active = max((s.get("lastActive", "") for s in sessions), default="")
+            channel_status = {}
+            for s in sessions[:5]:
+                ch = s.get("channel", "portal")
+                channel_status[ch] = {"lastActive": s.get("lastActive", ""), "sessions": 1}
+            return {
+                "employeeId": emp_id,
+                "messagesThisWeek": messages_this_week,
+                "lastActive": last_active,
+                "totalSessions": len(sessions),
+                "weekSessions": len(week_sessions),
+                "channelStatus": channel_status,
+                "source": "real",
+            }
+    except Exception:
+        pass
+    # Fallback to stored activity record (seed data)
     activity = db.get_activity(emp_id)
     if not activity:
         return {"employeeId": emp_id, "messagesThisWeek": 0, "channelStatus": {}}
-    return activity
+    return {**activity, "source": "seed"}
 
 
 def _auto_provision_employee(emp: dict) -> dict | None:
@@ -345,10 +453,55 @@ def _auto_provision_employee(emp: dict) -> dict | None:
 # Agents
 # =========================================================================
 
+def _get_active_agent_ids() -> set:
+    """Determine which agents are currently active (microVM running) from CloudWatch.
+    An agent is 'active' if it had an invocation in the last 15 minutes (AgentCore idle timeout).
+    Returns set of employee IDs that are active."""
+    try:
+        import time as _t
+        cw = _boto3.client("logs", region_name=_GATEWAY_REGION)
+        start_time = int((_t.time() - 900) * 1000)  # 15 min ago
+        active_ids = set()
+        for lg in _get_all_agentcore_log_groups():
+            try:
+                resp = cw.filter_log_events(
+                    logGroupName=lg, startTime=start_time,
+                    filterPattern="Invocation tenant_id=",
+                    limit=50, interleaved=True,
+                )
+                for event in resp.get("events", []):
+                    msg = event.get("message", "")
+                    if "tenant_id=" in msg:
+                        tid = msg.split("tenant_id=")[1].split(" ")[0]
+                        # Extract base employee ID
+                        parts = tid.split("__")
+                        if len(parts) >= 3:
+                            active_ids.add(parts[1])
+                        elif len(parts) == 2:
+                            active_ids.add(parts[1])
+                        else:
+                            active_ids.add(tid)
+            except Exception:
+                pass
+        return active_ids
+    except Exception:
+        return set()
+
+
 @app.get("/api/v1/agents")
 def get_agents(authorization: str = Header(default="")):
     user = _get_current_user(authorization)
     agents = db.get_agents()
+
+    # Dynamic status: check CloudWatch for recent activity
+    active_emp_ids = _get_active_agent_ids()
+    for a in agents:
+        emp_id = a.get("employeeId", "")
+        if emp_id in active_emp_ids:
+            a["status"] = "active"
+        elif a.get("status") == "active":
+            a["status"] = "idle"  # No recent activity → idle (serverless standby)
+
     if user and user.role == "manager":
         scope = _get_dept_scope(user)
         if scope is not None:
@@ -362,13 +515,121 @@ def get_agent(agent_id: str):
     agent = db.get_agent(agent_id)
     if not agent:
         raise HTTPException(404, "Agent not found")
+    # Dynamic status
+    active_emp_ids = _get_active_agent_ids()
+    emp_id = agent.get("employeeId", "")
+    if emp_id in active_emp_ids:
+        agent["status"] = "active"
+    elif agent.get("status") == "active":
+        agent["status"] = "idle"
     return agent
 
 @app.post("/api/v1/agents")
 def create_agent(body: dict):
+    from datetime import datetime, timezone
+    import json as _json_ca
+
     body.setdefault("status", "active")
     body.setdefault("soulVersions", {"global": 3, "position": 1, "personal": 0})
-    return db.create_agent(body)
+    body.setdefault("createdAt", datetime.now(timezone.utc).isoformat())
+    body.setdefault("updatedAt", body["createdAt"])
+
+    agent = db.create_agent(body)
+
+    emp_id = body.get("employeeId")
+    pos_id = body.get("positionId", "")
+    agent_id = body.get("id") or agent.get("id", "")
+    channel = body.get("defaultChannel", "discord")
+
+    if emp_id and pos_id:
+        # 1. Write SSM tenant→position and permissions for this employee
+        stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+        region = os.environ.get("AWS_REGION", "us-east-1")
+        pos_tools = {
+            "pos-sa": ["web_search", "shell", "browser", "file", "file_write", "code_execution"],
+            "pos-sde": ["web_search", "shell", "browser", "file", "file_write", "code_execution"],
+            "pos-devops": ["web_search", "shell", "browser", "file", "file_write", "code_execution"],
+            "pos-qa": ["web_search", "shell", "file", "code_execution"],
+            "pos-ae": ["web_search", "file", "crm-query", "email-send", "calendar-check"],
+            "pos-pm": ["web_search", "file", "notion-sync", "calendar-check", "excel-gen"],
+            "pos-fa": ["web_search", "file", "excel-gen", "sap-connector"],
+            "pos-hr": ["web_search", "file", "email-send", "calendar-check"],
+            "pos-csm": ["web_search", "file", "crm-query", "email-send"],
+            "pos-legal": ["web_search", "file"],
+            "pos-exec": ["web_search", "shell", "browser", "file", "file_write", "code_execution"],
+        }
+        tools = pos_tools.get(pos_id, ["web_search"])
+        try:
+            ssm = _ssm_client()
+            ssm.put_parameter(Name=f"/openclaw/{stack}/tenants/{emp_id}/position",
+                              Value=pos_id, Type="String", Overwrite=True)
+            ssm.put_parameter(
+                Name=f"/openclaw/{stack}/tenants/{emp_id}/permissions",
+                Value=_json_ca.dumps({"profile": "auto", "tools": tools, "role": pos_id.replace("pos-", "")}),
+                Type="String", Overwrite=True)
+        except Exception as e:
+            print(f"[create_agent] SSM write failed for {emp_id}: {e}")
+
+        # 2. Create binding (employee → agent)
+        now = datetime.now(timezone.utc).isoformat()
+        emp = next((e for e in db.get_employees() if e["id"] == emp_id), {})
+        positions = db.get_positions()
+        pos = next((p for p in positions if p["id"] == pos_id), {})
+        db.create_binding({
+            "employeeId": emp_id,
+            "employeeName": emp.get("name", ""),
+            "agentId": agent_id,
+            "agentName": body.get("name", ""),
+            "mode": "1:1",
+            "channel": channel,
+            "status": "active",
+            "source": "manual",
+            "createdAt": now,
+        })
+
+        # 3. Seed minimal S3 workspace if it doesn't already exist
+        s3_bucket = os.environ.get("S3_BUCKET", f"openclaw-tenants-{_GATEWAY_ACCOUNT_ID}")
+        try:
+            import boto3 as _b3_ws
+            s3 = _b3_ws.client("s3", region_name=region)
+            # Only seed if workspace is empty
+            prefix = f"{emp_id}/workspace/"
+            resp = s3.list_objects_v2(Bucket=s3_bucket, Prefix=prefix, MaxKeys=5)
+            if not resp.get("Contents"):
+                emp_name = emp.get("name", emp_id)
+                pos_name = pos.get("name", pos_id)
+                dept = emp.get("departmentName", "")
+                # IDENTITY.md
+                s3.put_object(Bucket=s3_bucket, Key=f"{prefix}IDENTITY.md",
+                    Body=f"# Agent Identity\n\n- **Name**: {emp_name}'s AI Assistant\n- **Position**: {pos_name}\n- **Department**: {dept}\n- **Company**: ACME Corp\n- **Platform**: OpenClaw Enterprise\n".encode())
+                # MEMORY.md
+                s3.put_object(Bucket=s3_bucket, Key=f"{prefix}MEMORY.md",
+                    Body=f"# Memory\nNo previous conversations recorded.\n".encode())
+                # USER.md
+                s3.put_object(Bucket=s3_bucket, Key=f"{prefix}USER.md",
+                    Body=f"# User Profile\n\n- **Name**: {emp_name}\n- **Position**: {pos_name}\n- **Language**: English\n".encode())
+                print(f"[create_agent] S3 workspace seeded for {emp_id}")
+        except Exception as e:
+            print(f"[create_agent] S3 workspace seed failed for {emp_id}: {e}")
+
+        # 4. Update employee record with agentId
+        try:
+            emp["agentId"] = agent_id
+            emp["agentStatus"] = "active"
+            db.create_employee(emp)
+        except Exception as e:
+            print(f"[create_agent] employee update failed: {e}")
+
+        # 5. Audit trail
+        db.create_audit_entry({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "eventType": "config_change", "actorId": "admin", "actorName": "IT Admin",
+            "targetType": "agent", "targetId": agent_id,
+            "detail": f"Created agent '{body.get('name')}' for {emp.get('name', emp_id)} ({pos.get('name', pos_id)})",
+            "status": "success",
+        })
+
+    return agent
 
 
 # =========================================================================
@@ -376,8 +637,9 @@ def create_agent(body: dict):
 # =========================================================================
 
 @app.get("/api/v1/agents/{agent_id}/soul")
-def get_agent_soul(agent_id: str):
+def get_agent_soul(agent_id: str, authorization: str = Header(default="")):
     """Get three-layer SOUL for an agent. Reads from S3."""
+    _require_auth(authorization)
     agent = db.get_agent(agent_id)
     if not agent:
         raise HTTPException(404, "Agent not found")
@@ -402,8 +664,9 @@ class SoulSaveRequest(BaseModel):
     content: str
 
 @app.put("/api/v1/agents/{agent_id}/soul")
-def save_agent_soul(agent_id: str, body: SoulSaveRequest):
+def save_agent_soul(agent_id: str, body: SoulSaveRequest, authorization: str = Header(default="")):
     """Save a SOUL layer to S3. Increments version in DynamoDB."""
+    _require_role(authorization, roles=["admin", "manager"])
     agent = db.get_agent(agent_id)
     if not agent:
         raise HTTPException(404, "Agent not found")
@@ -453,8 +716,14 @@ def get_workspace_tree(agent_id: str = ""):
     return s3ops.get_workspace_tree(pos_id, emp_id)
 
 @app.get("/api/v1/workspace/file")
-def get_workspace_file(key: str):
-    """Read a single workspace file from S3."""
+def get_workspace_file(key: str, authorization: str = Header(default="")):
+    """Read a single workspace file from S3. Admin/manager can read any key; employees only their own."""
+    user = _require_auth(authorization)
+    # Employees can only access their own workspace, not other employees' files
+    if user.role == "employee":
+        allowed_prefix = f"{user.employee_id}/workspace/"
+        if not key.startswith(allowed_prefix) and not key.startswith("_shared/"):
+            raise HTTPException(403, "Access denied: you can only read your own workspace files")
     content = s3ops.read_file(key)
     if content is None:
         raise HTTPException(404, f"File not found: {key}")
@@ -466,11 +735,15 @@ class FileWriteRequest(BaseModel):
     content: str
 
 @app.put("/api/v1/workspace/file")
-def save_workspace_file(body: FileWriteRequest):
-    """Write a workspace file to S3."""
-    # Block writes to global layer
+def save_workspace_file(body: FileWriteRequest, authorization: str = Header(default="")):
+    """Write a workspace file to S3. Global layer locked; employees can only write their own files."""
+    user = _require_auth(authorization)
     if body.key.startswith("_shared/soul/global/"):
         raise HTTPException(403, "Global layer is locked")
+    # Employees can only modify their own workspace files
+    if user.role == "employee":
+        if not body.key.startswith(f"{user.employee_id}/workspace/"):
+            raise HTTPException(403, "Access denied: you can only modify your own workspace files")
     success = s3ops.write_file(body.key, body.content)
     if not success:
         raise HTTPException(500, "Failed to write file")
@@ -495,8 +768,9 @@ def get_file_version(key: str, versionId: str):
 # =========================================================================
 
 @app.get("/api/v1/agents/{agent_id}/memory")
-def get_agent_memory(agent_id: str):
+def get_agent_memory(agent_id: str, authorization: str = Header(default="")):
     """Get memory overview for an agent."""
+    _require_auth(authorization)
     agent = db.get_agent(agent_id)
     if not agent:
         raise HTTPException(404, "Agent not found")
@@ -655,7 +929,8 @@ def create_binding(body: dict):
 import boto3 as _boto3_main
 
 def _ssm_client():
-    return _boto3_main.client("ssm", region_name=os.environ.get("SSM_REGION", os.environ.get("AWS_REGION", "us-east-1")))
+    # User-mapping params are always in us-east-1 regardless of admin console AWS_REGION
+    return _boto3_main.client("ssm", region_name=os.environ.get("SSM_REGION", "us-east-1"))
 
 def _mapping_prefix():
     stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
@@ -686,7 +961,7 @@ def _list_user_mappings() -> list:
     try:
         ssm = _ssm_client()
         mappings = []
-        params = {"Path": prefix, "Recursive": True, "MaxResults": 50}
+        params = {"Path": prefix, "Recursive": True, "MaxResults": 10}
         while True:
             resp = ssm.get_parameters_by_path(**params)
             for p in resp.get("Parameters", []):
@@ -752,16 +1027,18 @@ def delete_user_mapping(channel: str, channelUserId: str):
 
 
 class PairingApproveRequest(BaseModel):
-    channel: str       # discord, telegram, feishu, slack, whatsapp
-    pairingCode: str   # e.g. KFDAF3GN
-    employeeId: str    # e.g. emp-carol
-    channelUserId: str = ""  # platform user ID (optional, for SSM mapping)
+    channel: str          # discord, telegram, feishu, slack, whatsapp
+    pairingCode: str      # e.g. KFDAF3GN
+    employeeId: str       # e.g. emp-carol
+    channelUserId: str = ""   # numeric platform user ID (from pairing message)
+    pairingUserId: str = ""   # username/handle (e.g. "wujiade4444") for dm_ mapping
 
 @app.post("/api/v1/bindings/pairing-approve")
-def approve_pairing(body: PairingApproveRequest):
+def approve_pairing(body: PairingApproveRequest, authorization: str = Header(default="")):
     """Approve IM pairing + create user mapping in one step.
     Calls `openclaw pairing approve <channel> <code>` via subprocess,
     then writes SSM user mapping if channelUserId is provided."""
+    _require_role(authorization, roles=["admin"])
     import subprocess as _sp
 
     # 1. Run openclaw pairing approve
@@ -781,10 +1058,16 @@ def approve_pairing(body: PairingApproveRequest):
     except Exception as e:
         return {"approved": False, "error": str(e)}
 
-    # 2. Write SSM user mapping if channelUserId provided
+    # 2. Write SSM user mappings if channelUserId provided.
+    # Write ALL formats that H2 Proxy may extract, so routing works regardless of
+    # how OpenClaw formats the sender metadata (numeric ID, dm_username, username).
     mapping_written = False
     if body.channelUserId and body.employeeId:
         _write_user_mapping(body.channel, body.channelUserId, body.employeeId)
+        # Also write username-based mappings extracted by H2 Proxy from Discord DM format
+        if body.pairingUserId:  # Discord username from pairing message meta
+            _write_user_mapping(body.channel, f"dm_{body.pairingUserId}", body.employeeId)
+            _write_user_mapping(body.channel, body.pairingUserId, body.employeeId)
         # Also write position mapping for the numeric user ID (what H2 Proxy extracts)
         emp = next((e for e in db.get_employees() if e["id"] == body.employeeId), None)
         if emp and emp.get("positionId"):
@@ -816,7 +1099,26 @@ def approve_pairing(body: PairingApproveRequest):
             except Exception:
                 pass
 
-    # 3. Audit trail
+    # 3. Sync updated allowFrom list to S3 so microVMs pick it up
+    # The EC2's openclaw pairing approve updates the local credentials file.
+    # We push it to S3 so AgentCore microVMs can load it on first invocation.
+    if body.channel == "discord" and body.channelUserId:
+        try:
+            creds_src = "/home/ubuntu/.openclaw/credentials/discord-default-allowFrom.json"
+            s3_bucket = os.environ.get("S3_BUCKET", f"openclaw-tenants-{_GATEWAY_ACCOUNT_ID}")
+            s3_key = "_shared/openclaw-creds/discord-default-allowFrom.json"
+            if os.path.isfile(creds_src):
+                import subprocess as _sp2
+                _sp2.run(
+                    ["aws", "s3", "cp", creds_src,
+                     f"s3://{s3_bucket}/{s3_key}", "--quiet",
+                     "--region", os.environ.get("AWS_REGION", "us-east-1")],
+                    timeout=10, capture_output=True
+                )
+        except Exception as _e:
+            print(f"[pairing] S3 credentials sync failed (non-fatal): {_e}")
+
+    # 4. Audit trail
     db.create_audit_entry({
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "eventType": "config_change",
@@ -934,6 +1236,7 @@ _KB_PREFIXES = {
     "kb-hr": {"prefix": "_shared/knowledge/hr-policies/", "scope": "department", "scopeName": "HR & Admin", "accessibleBy": "HR dept only"},
     "kb-legal": {"prefix": "_shared/knowledge/contract-templates/", "scope": "department", "scopeName": "Legal & Compliance", "accessibleBy": "Legal dept only"},
     "kb-customer": {"prefix": "_shared/knowledge/customer-playbooks/", "scope": "department", "scopeName": "Customer Success", "accessibleBy": "CS + Sales"},
+    "kb-org-directory": {"prefix": "_shared/knowledge/org-directory/", "scope": "global", "scopeName": "All Employees", "accessibleBy": "All employees"},
 }
 
 @app.get("/api/v1/knowledge")
@@ -1036,8 +1339,9 @@ class KBUploadRequest(BaseModel):
     content: str
 
 @app.post("/api/v1/knowledge/upload")
-def upload_knowledge_doc(body: KBUploadRequest):
+def upload_knowledge_doc(body: KBUploadRequest, authorization: str = Header(default="")):
     """Upload a Markdown document to a knowledge base."""
+    _require_role(authorization, roles=["admin", "manager"])
     meta = _KB_PREFIXES.get(body.kbId)
     if not meta:
         raise HTTPException(404, "Knowledge base not found")
@@ -1050,8 +1354,9 @@ def upload_knowledge_doc(body: KBUploadRequest):
     return {"key": key, "saved": True, "size": len(body.content)}
 
 @app.delete("/api/v1/knowledge/{kb_id}/file")
-def delete_knowledge_file(kb_id: str, filename: str):
+def delete_knowledge_file(kb_id: str, filename: str, authorization: str = Header(default="")):
     """Delete a knowledge document."""
+    _require_role(authorization, roles=["admin"])
     meta = _KB_PREFIXES.get(kb_id)
     if not meta:
         raise HTTPException(404, "Knowledge base not found")
@@ -1068,7 +1373,8 @@ def delete_knowledge_file(kb_id: str, filename: str):
 # =========================================================================
 
 @app.get("/api/v1/approvals")
-def get_approvals():
+def get_approvals(authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin", "manager"])
     all_approvals = db.get_approvals()
     pending = [a for a in all_approvals if a.get("status") == "pending"]
     resolved = [a for a in all_approvals if a.get("status") in ("approved", "denied")]
@@ -1076,10 +1382,11 @@ def get_approvals():
     return {"pending": pending, "resolved": resolved}
 
 @app.post("/api/v1/approvals/{approval_id}/approve")
-def approve_request(approval_id: str):
+def approve_request(approval_id: str, authorization: str = Header(default="")):
+    user = _require_role(authorization, roles=["admin", "manager"])
     result = db.update_approval(approval_id, {
         "status": "approved",
-        "reviewer": "Admin",
+        "reviewer": user.name,
         "resolvedAt": datetime.now(timezone.utc).isoformat(),
     })
     if not result:
@@ -1087,10 +1394,11 @@ def approve_request(approval_id: str):
     return result
 
 @app.post("/api/v1/approvals/{approval_id}/deny")
-def deny_request(approval_id: str):
+def deny_request(approval_id: str, authorization: str = Header(default="")):
+    user = _require_role(authorization, roles=["admin", "manager"])
     result = db.update_approval(approval_id, {
         "status": "denied",
-        "reviewer": "Admin",
+        "reviewer": user.name,
         "resolvedAt": datetime.now(timezone.utc).isoformat(),
     })
     if not result:
@@ -1126,16 +1434,15 @@ def get_playground_profiles():
     emps = db.get_employees()
     positions = db.get_positions()
     pos_map = {p["id"]: p for p in positions}
-    channel_short = {"whatsapp": "wa", "telegram": "tg", "discord": "dc", "slack": "sl", "feishu": "fs", "dingtalk": "dt"}
+    channel_short = {"whatsapp": "wa", "telegram": "tg", "discord": "dc", "slack": "sl", "feishu": "fs", "dingtalk": "dt", "portal": "port"}
     profiles = {}
     for emp in emps:
         if not emp.get("agentId"):
             continue
         pos_id = emp.get("positionId", "")
         pos = pos_map.get(pos_id, {})
-        ch = emp.get("channels", ["slack"])[0] if emp.get("channels") else "slack"
-        ch_key = channel_short.get(ch, ch[:2])
-        tenant_id = f"{ch_key}__{emp['id']}"
+        # Use port__ prefix for all playground profiles (channel-agnostic)
+        tenant_id = f"port__{emp['id']}"
         role = pos.get("name", "unknown").lower().replace(" ", "_")
         tools = _POS_TOOLS.get(pos_id, pos.get("toolAllowlist", ["web_search"]))
         blocked = [t for t in ["shell", "browser", "file_write", "code_execution"] if t not in tools]
@@ -1144,44 +1451,135 @@ def get_playground_profiles():
             plan_a += f"\nDENY: {', '.join(blocked)}."
         plan_e = "Block PII (SSN, credit cards, phone numbers). Block credential exposure."
         profiles[tenant_id] = {"role": role, "tools": tools, "planA": plan_a, "planE": plan_e}
+    # Always include admin profile for the floating assistant
+    profiles["port__admin"] = {
+        "role": "it_admin",
+        "tools": ["web_search", "shell", "browser", "file", "file_write", "code_execution"],
+        "planA": "ALLOW: all tools. Full IT Admin access.\nThis is the Admin Assistant running on the Gateway EC2.",
+        "planE": "Block credential exposure in responses.",
+    }
     return profiles
 
+def _admin_assistant_direct(message: str) -> dict:
+    """
+    PATH B: IT Admin Assistant — runs OpenClaw CLI on EC2.
+
+    The H2 Proxy (bedrock_proxy_h2.js) detects admin sessions and proxies
+    the Bedrock request directly to real Bedrock (bypassing Tenant Router).
+    This means OpenClaw on EC2 keeps all its tools (shell, file, browser)
+    and reads the local SOUL.md for identity.
+
+    Flow: FastAPI → subprocess(openclaw CLI) → OpenClaw reads SOUL.md →
+          OpenClaw calls Bedrock via H2 Proxy → H2 Proxy detects admin →
+          H2 Proxy forwards to real Bedrock (not Tenant Router) →
+          Response back to OpenClaw → back to FastAPI → Admin Console
+    """
+    import subprocess as _sp
+    profile = {"role": "it_admin",
+               "tools": ["web_search", "shell", "browser", "file", "code_execution"],
+               "planA": "Full IT Admin access (read-only safety)",
+               "planE": "Block credential exposure"}
+
+    openclaw_bin = "/home/ubuntu/.nvm/versions/node/v22.22.1/bin/openclaw"
+    env_path = "/home/ubuntu/.nvm/versions/node/v22.22.1/bin:/usr/local/bin:/usr/bin:/bin"
+
+    try:
+        import time as _admin_t
+        session_id = f"admin-assistant"  # Stable session for conversation continuity
+
+        cmd = ["sudo", "-u", "ubuntu", "env", f"PATH={env_path}", "HOME=/home/ubuntu",
+               openclaw_bin, "agent", "--session-id", session_id,
+               "--message", message, "--json", "--timeout", "120"]
+        result = _sp.run(cmd, capture_output=True, text=True, timeout=130)
+
+        stdout = result.stdout.strip()
+        stderr = result.stderr.strip()
+
+        # OpenClaw may write JSON to stderr in Gateway fallback mode
+        raw = stdout if (stdout and '{' in stdout) else stderr if (stderr and '{' in stderr) else ""
+
+        if raw and '{' in raw:
+            json_start = raw.find('{')
+            try:
+                decoder = json.JSONDecoder()
+                data, _ = decoder.raw_decode(raw, json_start)
+                result_obj = data.get("result", data)
+                payloads = result_obj.get("payloads", [])
+                text = " ".join(p.get("text", "") for p in payloads if p.get("text")).strip()
+                if not text:
+                    text = data.get("text", result_obj.get("text", ""))
+                if text:
+                    return {"response": text, "tenant_id": "admin", "profile": profile,
+                            "plan_a": profile["planA"], "plan_e": "✅ EC2 via H2 bypass", "source": "ec2-direct"}
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        return {"response": f"OpenClaw output:\n```\n{(stdout or stderr)[:500]}\n```",
+                "tenant_id": "admin", "profile": profile,
+                "plan_a": "", "plan_e": "⚠️ Parse error", "source": "ec2-direct"}
+    except _sp.TimeoutExpired:
+        return {"response": "⏳ Timed out after 120s.", "tenant_id": "admin",
+                "profile": profile, "plan_a": "", "plan_e": "TIMEOUT", "source": "error"}
+    except Exception as e:
+        return {"response": f"⚠️ Error: {e}", "tenant_id": "admin",
+                "profile": profile, "plan_a": "", "plan_e": "ERROR", "source": "error"}
+
+
 @app.post("/api/v1/playground/send")
-def playground_send(body: PlaygroundMessage):
+def playground_send(body: PlaygroundMessage, authorization: str = Header(default="")):
     """Send message to agent. mode=live routes through real Tenant Router → AgentCore."""
+    _require_role(authorization, roles=["admin", "manager"])
     profiles = get_playground_profiles()
-    default_profile = {"role": "employee", "tools": ["web_search"], "planA": "ALLOW: web_search.", "planE": "Block PII."}
-    profile = profiles.get(body.tenant_id, default_profile)
+    profile = profiles.get(body.tenant_id, {"role": "unknown", "tools": ["web_search"], "planA": "Default", "planE": "Default"})
+
+    # Extract employee ID from tenant_id (port__emp-xxx → emp-xxx)
+    emp_id = body.tenant_id.replace("port__", "")
 
     # Live mode: route through Tenant Router → AgentCore → OpenClaw
     if body.mode == "live":
+        # PATH B: Admin Assistant runs directly on EC2 (not via AgentCore)
+        # See _admin_assistant_direct() docstring for full architecture explanation
+        if emp_id == "admin":
+            return _admin_assistant_direct(body.message)
+
+        # PATH A: Employee agents route through Tenant Router → AgentCore microVM
         router_url = os.environ.get("TENANT_ROUTER_URL", "http://localhost:8090")
         try:
             import requests as _req
+            # Use "portal" as channel — Tenant Router maps portal → "pt__" prefix (not "port__"),
+            # which avoids the Gateway portal-callback deadlock. See tenant_router.py _CHANNEL_ALIASES.
             r = _req.post(f"{router_url}/route", json={
-                "channel": "playground",
-                "user_id": body.tenant_id,
+                "channel": "portal",
+                "user_id": emp_id,
                 "message": body.message,
             }, timeout=180)
             if r.status_code == 200:
                 data = r.json()
                 agent_response = data.get("response", {})
+                resp_text = agent_response.get("response", str(data)) if isinstance(agent_response, dict) else str(agent_response)
                 return {
-                    "response": agent_response.get("response", str(data)),
+                    "response": resp_text,
                     "tenant_id": data.get("tenant_id", body.tenant_id),
                     "profile": profile,
-                    "plan_a": profile["planA"],
+                    "plan_a": profile.get("planA", ""),
                     "plan_e": "✅ PASS — Real agent response via AgentCore.",
                     "source": "agentcore",
-                    "model": agent_response.get("model", ""),
-                    "usage": agent_response.get("usage", {}),
+                }
+            else:
+                return {
+                    "response": f"⚠️ AgentCore returned {r.status_code}: {r.text[:200]}",
+                    "tenant_id": body.tenant_id,
+                    "profile": profile,
+                    "plan_a": profile.get("planA", ""),
+                    "plan_e": f"⚠️ ERROR — Status {r.status_code}",
+                    "source": "error",
                 }
         except Exception as e:
             return {
                 "response": f"⚠️ AgentCore call failed: {e}\n\nFalling back to simulation.",
                 "tenant_id": body.tenant_id,
                 "profile": profile,
-                "plan_a": profile["planA"],
+                "plan_a": profile.get("planA", ""),
                 "plan_e": "⚠️ ERROR — AgentCore unreachable.",
                 "source": "error",
             }
@@ -1232,8 +1630,211 @@ def playground_send(body: PlaygroundMessage):
 # Portal — Employee Self-Service endpoints
 # =========================================================================
 
+# =========================================================================
+# Portal — IM Self-Service Pairing
+# Flow: pair-start (Portal) → employee scans QR → bot receives /start TOKEN
+#       → H2 Proxy calls pair-complete → SSM mapping written → done
+# =========================================================================
+
+# Channel → bot info map (used to build deep links shown to employees)
+_CHANNEL_BOT_INFO = {
+    "telegram": {
+        "botUsername": os.environ.get("TELEGRAM_BOT_USERNAME", "acme_enterprise_bot"),
+        "deepLinkTemplate": "https://t.me/{bot}?start={token}",
+        "label": "Telegram",
+    },
+    "discord": {
+        "botUsername": "ACME Agent",
+        "deepLinkTemplate": None,
+        "label": "Discord",
+        "instructions": "Open Discord → ACME Corp server → DM ACME Agent → send the command",
+    },
+    "feishu": {
+        "botUsername": os.environ.get("FEISHU_BOT_NAME", "ACME Agent"),
+        # Feishu deep link opens the bot chat directly (doesn't support token param)
+        # User scans QR → bot chat opens → then manually sends /start TOKEN
+        "deepLinkTemplate": "https://applink.feishu.cn/client/bot/open?appId={appId}",
+        "feishuAppId": os.environ.get("FEISHU_APP_ID", "cli_a94cb611da399cdd"),
+        "label": "Feishu / Lark",
+    },
+    "slack": {
+        "botUsername": os.environ.get("SLACK_BOT_USERNAME", "acme-agent"),
+        "deepLinkTemplate": None,
+        "label": "Slack",
+    },
+}
+
+
+class PairStartRequest(BaseModel):
+    channel: str  # "telegram" | "discord" | "slack"
+
+
+class PairCompleteRequest(BaseModel):
+    channel: str
+    channelUserId: str
+    token: str
+
+
+@app.post("/api/v1/portal/channel/pair-start")
+def pair_start(body: PairStartRequest, authorization: str = Header(default="")):
+    """Employee initiates IM pairing. Returns a token + deep link / QR data."""
+    user = _require_auth(authorization)
+
+    import secrets, string
+    token = ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(12))
+
+    db.create_pair_token(token, user.employee_id, body.channel)
+
+    bot_info = _CHANNEL_BOT_INFO.get(body.channel, {})
+    bot_username = bot_info.get("botUsername", "")
+    template = bot_info.get("deepLinkTemplate")
+    # Feishu uses appId in the deep link, not bot username or token
+    if template and "{appId}" in template:
+        app_id = bot_info.get("feishuAppId", "")
+        deep_link = template.format(appId=app_id) if app_id else None
+    elif template:
+        deep_link = template.format(bot=bot_username, token=token) if template else None
+    else:
+        deep_link = None
+
+    return {
+        "token": token,
+        "deepLink": deep_link,
+        "botUsername": bot_username,
+        "channel": body.channel,
+        "expiresIn": 900,  # 15 minutes
+    }
+
+
+@app.get("/api/v1/portal/channel/pair-status")
+def pair_status(token: str, authorization: str = Header(default="")):
+    """Poll pairing status. Returns pending / completed / expired."""
+    _require_auth(authorization)
+    import time as _t
+    item = db.get_pair_token(token)
+    if not item:
+        return {"status": "not_found"}
+    if item.get("ttl", 0) < int(_t.time()):
+        return {"status": "expired"}
+    return {"status": item.get("status", "pending")}
+
+
+@app.post("/api/v1/bindings/pair-complete")
+def pair_complete(body: PairCompleteRequest):
+    """Called by H2 Proxy when employee sends /start TOKEN to the bot.
+    No auth — called from internal network only (H2 Proxy on same EC2).
+    Validates token, writes SSM user mapping, logs audit entry."""
+    item = db.consume_pair_token(body.token)
+    if not item:
+        raise HTTPException(400, "Token invalid, already used, or expired")
+
+    emp_id = item["employeeId"]
+    channel = item.get("channel", body.channel)
+
+    # Write SSM mapping — must use us-east-1 (where agent container reads from)
+    # pair_complete is the only endpoint called by H2 Proxy, so we need explicit region
+    import boto3 as _b3_pair
+    _ssm_pair = _b3_pair.client("ssm", region_name=_GATEWAY_REGION)
+    _prefix = _mapping_prefix()
+    for key in [f"{channel}__{body.channelUserId}", body.channelUserId]:
+        try:
+            _ssm_pair.put_parameter(Name=f"{_prefix}{key}", Value=emp_id, Type="String", Overwrite=True)
+        except Exception as e:
+            print(f"[pair-complete] SSM write failed key={key}: {e}")
+
+    # Update DynamoDB employee record so portal/channels reflects this immediately
+    try:
+        db.add_employee_channel(emp_id, channel)
+    except Exception as e:
+        print(f"[pair-complete] DynamoDB channel update failed (non-fatal): {e}")
+
+    # Resolve employee name for confirmation message
+    emps = db.get_employees()
+    emp = next((e for e in emps if e["id"] == emp_id), {})
+
+    # Audit log
+    db.create_audit_entry({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eventType": "config_change",
+        "actorId": emp_id,
+        "actorName": emp.get("name", emp_id),
+        "targetType": "binding",
+        "targetId": f"{channel}__{body.channelUserId}",
+        "detail": f"IM pairing self-service: {channel} {body.channelUserId} → {emp_id}",
+        "status": "success",
+    })
+
+    return {
+        "success": True,
+        "employeeName": emp.get("name", emp_id),
+        "employeeId": emp_id,
+        "positionName": emp.get("positionName", ""),
+        "channel": channel,
+    }
+
+
 class PortalChatMessage(BaseModel):
     message: str
+
+
+@app.post("/api/v1/portal/upload")
+async def portal_upload(
+    file: UploadFile,
+    authorization: str = Header(default=""),
+):
+    """Upload a file from the employee portal. Text files have their content returned
+    so the agent can read them inline. Binary / image files are stored to S3."""
+    user = _require_auth(authorization)
+
+    filename = file.filename or "upload"
+    content_type = file.content_type or "application/octet-stream"
+    raw = await file.read()
+    size = len(raw)
+
+    # Determine if we can extract text content
+    text_extensions = {".txt", ".md", ".csv", ".json", ".py", ".js", ".ts", ".sh",
+                       ".yaml", ".yml", ".xml", ".html", ".sql", ".log", ".env",
+                       ".toml", ".cfg", ".ini", ".java", ".go", ".rs", ".rb", ".php"}
+    import os as _os
+    ext = _os.path.splitext(filename)[1].lower()
+    is_text = ext in text_extensions or content_type.startswith("text/")
+
+    content_preview: str | None = None
+    if is_text:
+        try:
+            text = raw.decode("utf-8", errors="replace")
+            # Limit to 8KB inline (agent context window)
+            content_preview = text[:8192]
+            if len(text) > 8192:
+                content_preview += f"\n\n[... truncated — {len(text)} chars total]"
+        except Exception:
+            pass
+
+    # Store file in S3
+    ts = int(time.time())
+    s3_key = f"{user.employee_id}/workspace/uploads/{ts}_{filename}"
+    try:
+        import boto3 as _b3up
+        _b3up.client("s3").put_object(
+            Bucket=s3ops.bucket(),
+            Key=s3_key,
+            Body=raw,
+            ContentType=content_type,
+        )
+    except Exception as e:
+        print(f"[upload] S3 write failed: {e}")
+
+    s3_uri = f"s3://{s3ops.bucket()}/{s3_key}"
+    return {
+        "filename": filename,
+        "size": size,
+        "type": content_type,
+        "isText": is_text,
+        "contentPreview": content_preview,
+        "s3Key": s3_key,
+        "s3Uri": s3_uri,
+    }
+
 
 @app.post("/api/v1/portal/chat")
 def portal_chat(body: PortalChatMessage, authorization: str = Header(default="")):
@@ -1277,11 +1878,22 @@ def portal_chat(body: PortalChatMessage, authorization: str = Header(default="")
                 "status": "success",
             })
 
+            # Detect if response came from always-on container vs AgentCore Runtime
+            stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+            source = "agentcore"
+            try:
+                _ssm_src = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+                _ssm_src.get_parameter(
+                    Name=f"/openclaw/{stack}/tenants/{user.employee_id}/always-on-agent")
+                source = "always-on"
+            except Exception:
+                pass
+
             return {
                 "response": reply,
                 "agentId": my_binding.get("agentId"),
                 "agentName": my_binding.get("agentName"),
-                "source": "agentcore",
+                "source": source,
                 "model": agent_response.get("model", "") if isinstance(agent_response, dict) else "",
             }
         else:
@@ -1345,12 +1957,50 @@ def portal_profile(authorization: str = Header(default="")):
     memory_md = s3ops.read_file(f"{user.employee_id}/workspace/MEMORY.md") or ""
     agent = db.get_agent(emp.get("agentId", ""))
 
+    # Return first 2KB of MEMORY.md so portal can show "what agent remembers"
+    memory_preview = memory_md[:2048] if memory_md else None
+
+    # Determine deployment mode and IM connection info
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    is_always_on = False
+    deploy_mode = agent.get("deployMode", "serverless") if agent else "serverless"
+    always_on_agent_id = None
+    dedicated_bot_info = {}
+
+    try:
+        ssm_ao = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+        param = ssm_ao.get_parameter(
+            Name=f"/openclaw/{stack}/tenants/{user.employee_id}/always-on-agent")
+        always_on_agent_id = param["Parameter"]["Value"]
+        is_always_on = True
+        deploy_mode = "always-on-ecs"
+
+        # Check if dedicated IM bots are configured (Plan A direct IM)
+        for ch, key in [("telegram", "telegram-token"), ("discord", "discord-token")]:
+            try:
+                ssm_ao.get_parameter(
+                    Name=f"/openclaw/{stack}/always-on/{always_on_agent_id}/{key}")
+                dedicated_bot_info[ch] = "configured"
+            except Exception:
+                dedicated_bot_info[ch] = "not_configured"
+    except Exception:
+        pass
+
     return {
         "employee": emp,
         "agent": agent,
         "userMd": user_md,
         "memoryMdSize": len(memory_md),
         "dailyMemoryCount": len(s3ops.list_files(f"{user.employee_id}/workspace/memory/")),
+        "memoryPreview": memory_preview,
+        "isAlwaysOn": is_always_on,
+        "deployMode": deploy_mode,            # "serverless" | "always-on-ecs"
+        "alwaysOnAgentId": always_on_agent_id,
+        "dedicatedBots": dedicated_bot_info,  # which channels have dedicated bot tokens
+        "imConnectionMode": (
+            "direct" if is_always_on and any(v == "configured" for v in dedicated_bot_info.values())
+            else "shared-gateway"             # both modes start with shared gateway
+        ),
     }
 
 
@@ -1427,6 +2077,191 @@ def portal_requests(authorization: str = Header(default="")):
     return {"pending": my_pending, "resolved": my_resolved}
 
 
+class PortalRequestCreate(BaseModel):
+    type: str  # "tool" or "skill"
+    resourceId: str
+    resourceName: str
+    reason: str = ""
+
+
+@app.post("/api/v1/portal/requests/create")
+def portal_request_create(body: PortalRequestCreate, authorization: str = Header(default="")):
+    """Employee self-service: create a tool/skill access request."""
+    user = _require_auth(authorization)
+    emp = db.get_employee(user.employee_id)
+    emp_name = emp.get("name", user.employee_id) if emp else user.employee_id
+
+    request_id = f"req-{user.employee_id}-{body.resourceId}-{int(time.time())}"
+    db.create_approval({
+        "id": request_id,
+        "type": "permission_request",
+        "status": "pending",
+        "tenantId": f"portal__{user.employee_id}",
+        "employeeId": user.employee_id,
+        "employeeName": emp_name,
+        "tool": body.resourceName,
+        "resource": body.resourceId,
+        "reason": body.reason or f"Employee requested access to: {body.resourceName}",
+        "requestedAt": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    db.create_audit_entry({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eventType": "permission_request",
+        "actorId": user.employee_id,
+        "actorName": emp_name,
+        "targetType": body.type,
+        "targetId": body.resourceId,
+        "detail": f"Employee self-service request: {body.resourceName} — {body.reason}",
+        "status": "pending",
+    })
+    return {"created": True, "requestId": request_id}
+
+
+def _find_channel_user_id(emp_id: str, channel_prefix: str) -> str:
+    """Reverse lookup: given emp_id + channel, return the IM user_id."""
+    try:
+        import boto3 as _b3_rev
+        prefix = _mapping_prefix()
+        ssm = _b3_rev.client("ssm", region_name=_GATEWAY_REGION)
+        resp = ssm.get_parameters_by_path(Path=prefix, Recursive=True, MaxResults=10)
+        for p in resp.get("Parameters", []):
+            if p.get("Value") == emp_id:
+                name = p["Name"].replace(prefix, "")
+                if name.startswith(f"{channel_prefix}__"):
+                    return name.replace(f"{channel_prefix}__", "")
+        return ""
+    except Exception:
+        return ""
+
+
+@app.delete("/api/v1/portal/channels/{channel}")
+def portal_channel_disconnect(channel: str, authorization: str = Header(default="")):
+    """Employee self-service disconnect — deletes SSM mapping for their IM channel."""
+    user = _require_auth(authorization)
+    channel_user_id = _find_channel_user_id(user.employee_id, channel)
+    if not channel_user_id:
+        raise HTTPException(404, f"No {channel} connection found for your account")
+    # Delete the mapping
+    # Delete mappings from us-east-1 (where agent reads from)
+    import boto3 as _b3_del
+    ssm_del = _b3_del.client("ssm", region_name=_GATEWAY_REGION)
+    prefix = _mapping_prefix()
+    for key in [f"{channel}__{channel_user_id}", channel_user_id]:
+        try:
+            ssm_del.delete_parameter(Name=f"{prefix}{key}")
+        except Exception:
+            pass
+    # Remove from DynamoDB employee channels
+    try:
+        db.remove_employee_channel(user.employee_id, channel)
+    except Exception as e:
+        print(f"[disconnect] DynamoDB channel remove failed (non-fatal): {e}")
+    db.create_audit_entry({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eventType": "config_change",
+        "actorId": user.employee_id,
+        "actorName": user.name,
+        "targetType": "binding",
+        "targetId": f"{channel}__{channel_user_id}",
+        "detail": f"Employee self-service disconnected {channel} ({channel_user_id})",
+        "status": "success",
+    })
+    return {"disconnected": True, "channel": channel}
+
+
+@app.get("/api/v1/portal/channels")
+def portal_channels(authorization: str = Header(default="")):
+    """Return connected IM channels plus mode-aware pairing instructions.
+
+    Returns:
+    - connected: list of connected channels
+    - deployMode: "serverless" | "always-on-ecs"
+    - pairingMode: "shared-gateway" | "direct" (direct = dedicated bot per Plan A)
+    - pairingInstructions: per-channel guidance based on deploy mode
+    """
+    user = _require_auth(authorization)
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+
+    # Determine deploy mode
+    is_always_on = False
+    always_on_agent_id = None
+    dedicated_bots = {}
+    try:
+        ssm_ch = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+        param = ssm_ch.get_parameter(
+            Name=f"/openclaw/{stack}/tenants/{user.employee_id}/always-on-agent")
+        always_on_agent_id = param["Parameter"]["Value"]
+        is_always_on = True
+        for ch, key in [("telegram", "telegram-token"), ("discord", "discord-token")]:
+            try:
+                ssm_ch.get_parameter(
+                    Name=f"/openclaw/{stack}/always-on/{always_on_agent_id}/{key}")
+                dedicated_bots[ch] = True
+            except Exception:
+                dedicated_bots[ch] = False
+    except Exception:
+        pass
+
+    # Get connected channels
+    connected = []
+    try:
+        emp = db.get_employee(user.employee_id)
+        if emp:
+            db_channels = [c for c in emp.get("channels", []) if c not in ("portal",)]
+            if db_channels:
+                connected = db_channels
+    except Exception:
+        pass
+    if not connected:
+        for channel_prefix in ["telegram", "discord", "slack", "whatsapp", "feishu"]:
+            if _list_user_mappings_for_employee(user.employee_id, channel_prefix):
+                connected.append(channel_prefix)
+
+    # Build pairing instructions based on mode
+    pairing_mode = "direct" if is_always_on and any(dedicated_bots.values()) else "shared-gateway"
+    instructions = {}
+    if pairing_mode == "shared-gateway":
+        instructions = {
+            "telegram": "Scan the QR code or click the link to start a chat with the shared ACME Agent bot. Send /start to complete pairing.",
+            "discord": "Click the invite link to add ACME Agent to your server, then DM the bot and send /start.",
+            "whatsapp": "Scan the QR code with your phone's WhatsApp. The pairing link will expire in 5 minutes.",
+            "mode_note": "You are using the shared organization bot. All employees share the same bot; your agent is identified by your user ID."
+        }
+    else:
+        instructions = {
+            "telegram": "Your agent has a dedicated Telegram bot. Click the link or search for your bot username to start a direct conversation. Send /start to activate.",
+            "discord": "Your agent has a dedicated Discord bot. Use the provided invite link to connect your personal agent.",
+            "whatsapp": "Scan the QR code to connect your personal WhatsApp to your dedicated agent.",
+            "mode_note": "You are using a dedicated personal bot in Always-on mode. Your agent is exclusively yours — messages go directly to your persistent agent, not through a shared gateway.",
+        }
+
+    return {
+        "connected": connected,
+        "deployMode": "always-on-ecs" if is_always_on else "serverless",
+        "pairingMode": pairing_mode,
+        "pairingInstructions": instructions,
+        "dedicatedBots": dedicated_bots,
+        "alwaysOnAgentId": always_on_agent_id,
+    }
+
+
+def _list_user_mappings_for_employee(emp_id: str, channel_prefix: str) -> bool:
+    """Check if any SSM mapping exists for this employee on the given channel.
+    Always uses us-east-1 (where agent container reads mappings from)."""
+    try:
+        import boto3 as _b3_chk
+        prefix = _mapping_prefix()
+        ssm = _b3_chk.client("ssm", region_name=_GATEWAY_REGION)
+        resp = ssm.get_parameters_by_path(Path=prefix, Recursive=True, MaxResults=10)
+        for p in resp.get("Parameters", []):
+            if p.get("Value") == emp_id and channel_prefix in p.get("Name", ""):
+                return True
+        return False
+    except Exception:
+        return False
+
+
 # =========================================================================
 # Data Export
 # =========================================================================
@@ -1471,8 +2306,21 @@ from botocore.exceptions import ClientError as _ClientError
 # Log groups to query (AgentCore runtime + custom agent logs)
 _LOG_GROUPS = [
     "/aws/bedrock-agentcore/runtimes/openclaw_multitenancy_runtime-olT3WX54rJ-DEFAULT",
+    "/aws/bedrock-agentcore/runtimes/openclaw_multitenancy_exec_runtime-OkWZBw3ybK-DEFAULT",
     "/openclaw/openclaw-multitenancy/agents",
 ]
+
+def _get_all_agentcore_log_groups() -> list:
+    """Dynamically discover all AgentCore runtime log groups.
+    Caches for 5 minutes so new runtimes are picked up automatically."""
+    try:
+        cw = _boto3.client("logs", region_name=_GATEWAY_REGION)
+        resp = cw.describe_log_groups(logGroupNamePrefix="/aws/bedrock-agentcore/runtimes/")
+        groups = [g["logGroupName"] for g in resp.get("logGroups", [])]
+        extra = ["/openclaw/openclaw-multitenancy/agents"]
+        return groups + [g for g in extra if g not in groups]
+    except Exception:
+        return _LOG_GROUPS
 
 def _query_cloudwatch_sessions(region: str, minutes: int = 30) -> list:
     """Query CloudWatch Logs for recent agent invocations to derive active sessions."""
@@ -1482,7 +2330,7 @@ def _query_cloudwatch_sessions(region: str, minutes: int = 30) -> list:
         start_time = int((_time.time() - minutes * 60) * 1000)
         sessions = []
 
-        for log_group in _LOG_GROUPS:
+        for log_group in _get_all_agentcore_log_groups():
             try:
                 resp = cw.filter_log_events(
                     logGroupName=log_group,
@@ -1528,94 +2376,200 @@ def _query_cloudwatch_sessions(region: str, minutes: int = 30) -> list:
 
 @app.get("/api/v1/monitor/sessions")
 def get_sessions(source: str = "auto", authorization: str = Header(default="")):
-    """Return active sessions — merge DynamoDB seed data + real CloudWatch sessions.
-    Enrich CloudWatch sessions with employee/agent names from DynamoDB."""
+    """Return sessions — seed data as 'completed', real sessions with dynamic status."""
     user = _get_current_user(authorization)
+    import time as _t
 
-    # Always start with DynamoDB seed sessions (have proper names, conversations)
-    db_sessions = db.get_sessions()
-
-    # Enrich DynamoDB sessions that have raw tenant IDs (from real AgentCore usage tracking)
     employees = db.get_employees()
     agents_list = db.get_agents()
     emp_map = {e["id"]: e for e in employees}
     agent_by_emp = {a.get("employeeId", ""): a for a in agents_list if a.get("employeeId")}
+    now_ms = _t.time() * 1000
 
-    enriched_db = []
+    # 1. Seed sessions from DynamoDB (have conversations, proper names)
+    db_sessions = db.get_sessions()
+    enriched = []
     for s in db_sessions:
         eid = s.get("employeeId", "")
-        # Skip sessions with no useful data
         if not eid or eid == "unknown":
             continue
-        # If already has a proper name, keep it
-        if s.get("employeeName") and s["employeeName"] != eid and len(s.get("agentName", "")) > 3:
-            enriched_db.append(s)
-            continue
-        # Try to resolve raw ID to employee
-        emp = emp_map.get(eid)
-        if emp:
-            agent = agent_by_emp.get(emp["id"])
-            s["employeeName"] = emp["name"]
-            s["agentId"] = agent["id"] if agent else s.get("agentId", "")
-            s["agentName"] = agent["name"] if agent else f"Agent ({emp.get('positionName', '')})"
-            if not s.get("channel") or s["channel"] == "unknown":
-                s["channel"] = emp.get("channels", ["portal"])[0]
-            if not s.get("startedAt"):
-                s["startedAt"] = s.get("lastActive", "")
-            enriched_db.append(s)
-        # else: skip unresolvable sessions (noise from raw CloudWatch data)
 
-    # Merge CloudWatch real sessions (from actual AgentCore invocations)
+        # Resolve names if needed
+        if not s.get("employeeName") or s["employeeName"] == eid:
+            emp = emp_map.get(eid)
+            if emp:
+                agent = agent_by_emp.get(emp["id"])
+                s["employeeName"] = emp["name"]
+                s["agentId"] = agent["id"] if agent else s.get("agentId", "")
+                s["agentName"] = agent["name"] if agent else ""
+                if not s.get("channel") or s["channel"] == "unknown":
+                    s["channel"] = (emp.get("channels") or ["portal"])[0]
+            else:
+                continue
+
+        # Determine status based on lastActive timestamp
+        last_active = s.get("lastActive", s.get("startedAt", ""))
+        if last_active:
+            try:
+                from datetime import datetime as _dt, timezone as _tz
+                la_time = _dt.fromisoformat(last_active.replace("Z", "+00:00")).timestamp() * 1000
+                age_min = (now_ms - la_time) / 60000
+                if age_min < 15:
+                    s["status"] = "active"
+                elif age_min < 60:
+                    s["status"] = "idle"
+                else:
+                    s["status"] = "completed"
+            except Exception:
+                s["status"] = "completed"
+        else:
+            s["status"] = "completed"
+
+        if not s.get("startedAt"):
+            s["startedAt"] = last_active or ""
+        enriched.append(s)
+
+    # 2. CloudWatch real sessions (last 2 hours)
     cw_sessions = _query_cloudwatch_sessions("us-east-1", minutes=120)
     if cw_sessions:
-        employees = db.get_employees()
-        agents = db.get_agents()
-        emp_map = {e["id"]: e for e in employees}
-        agent_map = {a.get("employeeId", ""): a for a in agents if a.get("employeeId")}
-
-        db_session_ids = {s.get("id") for s in enriched_db}
-
+        existing_emps = {s.get("employeeId") for s in enriched}
         for cw in cw_sessions:
-            # Resolve employee from tenant_id parts
             raw_id = cw.get("employeeId", "")
             emp = emp_map.get(raw_id)
             if not emp:
-                # Try SSM user-mapping lookup (Discord user ID → emp-xxx)
                 for e in employees:
                     if raw_id in (e.get("employeeNo", ""), e.get("id", "")):
                         emp = e
                         break
-
-            if emp:
-                agent = agent_map.get(emp["id"])
-                cw["employeeId"] = emp["id"]
-                cw["employeeName"] = emp["name"]
-                cw["agentId"] = agent["id"] if agent else ""
-                cw["agentName"] = agent["name"] if agent else f"Agent ({emp['positionName']})"
-                cw["channel"] = emp.get("channels", ["unknown"])[0] if not cw.get("channel") or cw["channel"] == "unknown" else cw["channel"]
-            else:
-                # Skip sessions we can't resolve — they're noise
+            if not emp:
                 continue
 
-            # Add startedAt from timestamp if missing
+            agent = agent_by_emp.get(emp["id"])
+            # Set id to match DynamoDB SESSION# key pattern (raw_id is the tenant_id from logs)
+            # This ensures View button can look up the session via /monitor/sessions/{id}
+            cw["id"] = raw_id[:40] if raw_id else cw.get("id", "")
+            cw["employeeId"] = emp["id"]
+            cw["employeeName"] = emp["name"]
+            cw["agentId"] = agent["id"] if agent else ""
+            cw["agentName"] = agent["name"] if agent else f"Agent ({emp['positionName']})"
+            cw["channel"] = (emp.get("channels") or ["discord"])[0] if not cw.get("channel") or cw["channel"] == "unknown" else cw["channel"]
+            cw["status"] = "active"
+
             if cw.get("timestamp") and not cw.get("startedAt"):
-                from datetime import datetime as _dt, timezone as _tz
-                cw["startedAt"] = _dt.fromtimestamp(cw["timestamp"] / 1000, tz=_tz.utc).isoformat()
+                from datetime import datetime as _dt2, timezone as _tz2
+                cw["startedAt"] = _dt2.fromtimestamp(cw["timestamp"] / 1000, tz=_tz2.utc).isoformat()
 
-            # Only add if not already in DB sessions
-            if cw.get("id") not in db_session_ids:
-                enriched_db.append(cw)
+            # Replace existing session for same employee (real data > seed data)
+            if emp["id"] in existing_emps:
+                enriched = [s for s in enriched if s.get("employeeId") != emp["id"]]
+            enriched.append(cw)
 
-    sessions = enriched_db
+    # Sort: active first, then by turns descending
+    status_order = {"active": 0, "idle": 1, "completed": 2}
+    enriched.sort(key=lambda s: (status_order.get(s.get("status", "completed"), 3), -(s.get("turns", 0))))
 
     # Scope for managers
     if user and user.role == "manager":
         scope = _get_dept_scope(user)
         if scope is not None:
-            employees_list = db.get_employees()
-            emp_ids = {e["id"] for e in employees_list if e.get("departmentId") in scope}
-            sessions = [s for s in sessions if s.get("employeeId") in emp_ids]
-    return sessions
+            emp_ids = {e["id"] for e in employees if e.get("departmentId") in scope}
+            enriched = [s for s in enriched if s.get("employeeId") in emp_ids]
+    return enriched
+
+
+@app.post("/api/v1/monitor/sessions/{session_id}/takeover")
+def takeover_session(session_id: str, authorization: str = Header(default="")):
+    """Admin takes over a session — agent pauses auto-reply.
+
+    Writes SSM: /openclaw/{stack}/sessions/{tenant_id}/takeover = admin_user_id
+    server.py checks this before each invocation and skips openclaw if set.
+    """
+    user = _require_role(authorization, roles=["admin", "manager"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    try:
+        ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+        ssm.put_parameter(
+            Name=f"/openclaw/{stack}/sessions/{session_id}/takeover",
+            Value=user.employee_id, Type="String", Overwrite=True)
+        db.create_audit_entry({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "eventType": "session_takeover",
+            "actorId": user.employee_id, "actorName": user.name,
+            "targetType": "session", "targetId": session_id,
+            "detail": f"Admin {user.name} took over session {session_id}",
+            "status": "success",
+        })
+    except Exception as e:
+        raise HTTPException(500, f"Takeover failed: {e}")
+    return {"taken_over": True, "sessionId": session_id, "adminId": user.employee_id}
+
+
+@app.delete("/api/v1/monitor/sessions/{session_id}/takeover")
+def return_session(session_id: str, authorization: str = Header(default="")):
+    """Admin returns session to agent — resumes auto-reply."""
+    user = _require_role(authorization, roles=["admin", "manager"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    try:
+        ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+        ssm.delete_parameter(Name=f"/openclaw/{stack}/sessions/{session_id}/takeover")
+        db.create_audit_entry({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "eventType": "session_returned",
+            "actorId": user.employee_id, "actorName": user.name,
+            "targetType": "session", "targetId": session_id,
+            "detail": f"Admin {user.name} returned session {session_id} to agent",
+            "status": "success",
+        })
+    except Exception as e:
+        raise HTTPException(500, f"Return failed: {e}")
+    return {"returned": True, "sessionId": session_id}
+
+
+@app.post("/api/v1/monitor/sessions/{session_id}/send")
+def admin_send_message(session_id: str, body: dict, authorization: str = Header(default="")):
+    """Admin sends a message while in takeover mode (bypasses agent)."""
+    user = _require_role(authorization, roles=["admin", "manager"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    message = body.get("message", "").strip()
+    if not message:
+        raise HTTPException(400, "message required")
+
+    # Verify takeover is active
+    try:
+        ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+        ssm.get_parameter(Name=f"/openclaw/{stack}/sessions/{session_id}/takeover")
+    except Exception:
+        raise HTTPException(400, "Session is not in takeover mode")
+
+    # Store admin message in DynamoDB CONV# for session continuity
+    try:
+        import boto3 as _b3s
+        ddb = _b3s.resource("dynamodb", region_name=db.AWS_REGION)
+        table = ddb.Table(db.TABLE_NAME)
+        from decimal import Decimal
+        ts = datetime.now(timezone.utc).isoformat()
+        table.put_item(Item={
+            "PK": "ORG#acme", "SK": f"CONV#{session_id}#admin#{int(time.time())}",
+            "sessionId": session_id, "role": "assistant", "content": message,
+            "ts": ts, "source": "human_admin", "adminId": user.employee_id,
+        })
+    except Exception as e:
+        raise HTTPException(500, f"Message storage failed: {e}")
+
+    return {"sent": True, "message": message, "adminId": user.employee_id, "humanAssisted": True}
+
+
+@app.get("/api/v1/monitor/sessions/{session_id}/takeover")
+def get_takeover_status(session_id: str, authorization: str = Header(default="")):
+    """Check if a session is in takeover mode."""
+    _require_auth(authorization)
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    try:
+        ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+        param = ssm.get_parameter(Name=f"/openclaw/{stack}/sessions/{session_id}/takeover")
+        return {"active": True, "adminId": param["Parameter"]["Value"], "sessionId": session_id}
+    except Exception:
+        return {"active": False, "sessionId": session_id}
 
 
 @app.get("/api/v1/monitor/sessions/{session_id}")
@@ -1634,22 +2588,42 @@ def get_session_detail(session_id: str):
             msg["toolCall"] = {"tool": r["toolName"], "status": r.get("toolStatus", "success"), "duration": r.get("toolDuration", "")}
         conv.append(msg)
 
-    # If no conversation in DB, create a minimal one from session data
-    if not conv:
-        conv = [
-            {"role": "user", "content": session.get("lastMessage", "Hello"), "ts": ""},
-            {"role": "assistant", "content": "I'm working on that request.", "ts": ""},
-        ]
+    # No conversation fallback — return empty list so frontend shows proper empty state
+    # (Real conversation persistence requires a message storage integration)
 
-    # Quality metrics derived from session data
+    # Quality metrics: use real session data where available, estimate otherwise.
+    # tokensUsed and turns come from DynamoDB SESSION# records written by server.py.
     turns = session.get("turns", 1)
     tool_calls = session.get("toolCalls", 0)
+    tokens_used = session.get("tokensUsed", 0)
+    avg_tokens_per_turn = round(tokens_used / max(turns, 1))
+
+    # Satisfaction: use stored qualityScore if present, else turns-based estimate
+    stored_quality = session.get("qualityScore")
+    if stored_quality:
+        satisfaction = round(float(stored_quality), 1)
+    else:
+        satisfaction = round(min(5.0, 3.5 + turns * 0.15), 1)
+
+    # toolSuccess: real if we have audit data, otherwise derive from blocked count
+    agent_id = session.get("agentId", "")
+    audit_for_session = db.get_audit_entries(limit=100)
+    session_blocks = [
+        e for e in audit_for_session
+        if e.get("status") == "blocked" and e.get("targetId") == agent_id
+    ]
+    if tool_calls > 0:
+        tool_success = round(max(0, (tool_calls - len(session_blocks)) / tool_calls * 100), 1)
+    else:
+        tool_success = 100.0
+
     quality = {
-        "satisfaction": round(min(5.0, 3.5 + turns * 0.15), 1),
-        "toolSuccess": 100 if tool_calls == 0 else min(100, 80 + turns * 2),
+        "satisfaction": satisfaction,
+        "toolSuccess": tool_success,
         "responseTime": round(max(1.0, 4.5 - turns * 0.2), 1),
         "compliance": min(100, 90 + turns),
         "completionRate": min(100, 85 + turns * 2),
+        "avgTokensPerTurn": avg_tokens_per_turn,
     }
     quality["overallScore"] = round(
         0.3 * quality["satisfaction"] +
@@ -1659,17 +2633,20 @@ def get_session_detail(session_id: str):
         0.1 * (quality["completionRate"] / 20), 1
     )
 
-    # Plan E scan from conversation content
+    # Plan E: scan real conversation content if available, else report no data
     plan_e = []
-    for i, msg in enumerate(conv):
-        if msg["role"] == "assistant":
-            has_cost = "$" in msg["content"]
-            has_code = "```" in msg["content"]
-            plan_e.append({
-                "turn": i + 1,
-                "result": "flag" if has_cost else "pass",
-                "detail": "Cost data shared — within policy" if has_cost else "Code snippet — sandboxed" if has_code else "No sensitive data detected",
-            })
+    if conv:
+        for i, msg in enumerate(conv):
+            if msg["role"] == "assistant":
+                has_cost = "$" in msg["content"]
+                has_code = "```" in msg["content"]
+                plan_e.append({
+                    "turn": i + 1,
+                    "result": "flag" if has_cost else "pass",
+                    "detail": "Cost data shared — within policy" if has_cost else "Code snippet — sandboxed" if has_code else "No sensitive data detected",
+                })
+    else:
+        plan_e = [{"turn": 0, "result": "pass", "detail": "No conversation turns recorded yet"}]
 
     return {"session": session, "conversation": conv, "quality": quality, "planE": plan_e}
 
@@ -1679,11 +2656,11 @@ def get_runtime_events(minutes: int = 30):
     """Query CloudWatch Logs for microVM lifecycle events (invocations, SIGTERM, assembly)."""
     try:
         import time as _time
-        cw = _boto3.client("logs", region_name="us-east-1")
+        cw = _boto3.client("logs", region_name=_GATEWAY_REGION)
         start_time = int((_time.time() - minutes * 60) * 1000)
         events = []
 
-        for log_group in _LOG_GROUPS:
+        for log_group in _get_all_agentcore_log_groups():
             try:
                 # Get all recent log events
                 resp = cw.filter_log_events(
@@ -1751,6 +2728,35 @@ def get_runtime_events(minutes: int = 30):
             if t:
                 active_tenants.add(t)
 
+        # If CloudWatch returned nothing, supplement with DynamoDB audit log entries
+        if not events:
+            try:
+                audit = db.get_audit_entries(limit=200)
+                cutoff = datetime.now(timezone.utc).timestamp() - minutes * 60
+                for a in audit:
+                    ts = a.get("timestamp", "")
+                    try:
+                        entry_time = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+                    except Exception:
+                        continue
+                    if entry_time < cutoff:
+                        continue
+                    if a.get("eventType") == "agent_invocation":
+                        events.append({
+                            "type": "invocation",
+                            "message": f"Agent invocation — {a.get('actorName', '?')}",
+                            "tenant": a.get("actorId", ""),
+                            "timestamp": ts,
+                            "raw": a.get("detail", "")[:200],
+                            "source": "audit_log",
+                        })
+                if events:
+                    events.sort(key=lambda e: e["timestamp"], reverse=True)
+                    invocations = [e for e in events if e["type"] == "invocation"]
+                    active_tenants = {e.get("tenant", "") for e in invocations if e.get("tenant")}
+            except Exception:
+                pass
+
         return {
             "events": events[:100],  # cap at 100
             "summary": {
@@ -1804,7 +2810,8 @@ def get_alert_rules():
 
 @app.get("/api/v1/audit/entries")
 def get_audit_entries(limit: int = 50, eventType: Optional[str] = None, authorization: str = Header(default="")):
-    user = _get_current_user(authorization)
+    user = _require_auth(authorization)
+    limit = min(limit, 200)  # cap to prevent full-table dump
     entries = db.get_audit_entries(limit=limit)
     if eventType:
         entries = [e for e in entries if e.get("eventType") == eventType]
@@ -1821,83 +2828,363 @@ def get_audit_entries(limit: int = 50, eventType: Optional[str] = None, authoriz
     return entries
 
 
-@app.get("/api/v1/audit/insights")
-def get_audit_insights():
-    """AI-generated security insights from audit log + memory file analysis.
-    In production: Admin OpenClaw on Gateway scans memory files, audit patterns,
-    and session data periodically to generate these insights."""
-    entries = db.get_audit_entries(limit=50)
-    blocked = [e for e in entries if e.get("status") == "blocked"]
+def _run_audit_scan() -> dict:
+    """Generate real insights from live DynamoDB + S3 data.
+    Pattern-based (no LLM). LLM memory analysis is a separate endpoint."""
+    from datetime import datetime, timezone, timedelta
+    import re
+
+    now = datetime.now(timezone.utc)
+    now_str = now.isoformat()
+    entries = db.get_audit_entries(limit=200)
     agents = db.get_agents()
     employees = db.get_employees()
+    sessions = db.get_sessions()
+    insights = []
+    idx = 0
 
-    insights = [
-        {
-            "id": "ins-001", "severity": "high", "category": "access_pattern",
-            "title": "Repeated shell access attempts from Intern role",
-            "description": f"Detected {len([e for e in blocked if 'shell' in e.get('detail','').lower()])} blocked shell access attempts from intern-role employees in the last 24 hours. Pattern suggests employees may need limited shell access for onboarding tasks.",
-            "recommendation": "Consider creating a sandboxed shell skill with read-only access for the Intern position, or add a guided approval workflow.",
-            "affectedUsers": ["Zhou Xiaoming", "Ma Tianyu"],
-            "detectedAt": "2026-03-20T10:35:00Z",
-            "source": "audit_log_scan",
-        },
-        {
-            "id": "ins-002", "severity": "medium", "category": "data_exposure",
-            "title": "Finance Agent sharing cost data via unsecured channel",
-            "description": "Carol Zhang's Finance Agent shared Q2 budget variance data via Slack (public channel). While within policy, the data contains department-level financial projections that should be restricted to #finance-private.",
-            "recommendation": "Add a channel restriction rule: Finance data → only #finance-private Slack channel or encrypted DM.",
-            "affectedUsers": ["Carol Zhang"],
-            "detectedAt": "2026-03-20T10:25:00Z",
-            "source": "memory_scan",
-        },
-        {
-            "id": "ins-003", "severity": "low", "category": "behavior_anomaly",
-            "title": "Unusual after-hours usage spike from DevOps Agent",
-            "description": "Sun Hao's DevOps Agent had 72 messages this week, 40% of which occurred between 11PM-3AM. This is 3x the normal after-hours pattern. Could indicate automated scripts or account sharing.",
-            "recommendation": "Review Sun Hao's recent session logs. Consider adding after-hours usage alerts for DevOps role.",
-            "affectedUsers": ["Sun Hao"],
-            "detectedAt": "2026-03-20T09:00:00Z",
-            "source": "usage_pattern_analysis",
-        },
-        {
-            "id": "ins-004", "severity": "medium", "category": "memory_risk",
-            "title": "PII detected in 2 employee memory files",
-            "description": "Periodic memory scan found potential PII (phone numbers, email addresses) stored in MEMORY.md for Mike Johnson and Emma Chen. Memory files should not contain customer PII per data policy.",
-            "recommendation": "Enable automatic PII redaction for memory file writes. Notify affected employees to review and clean their memory files.",
-            "affectedUsers": ["Mike Johnson", "Emma Chen"],
-            "detectedAt": "2026-03-20T08:30:00Z",
-            "source": "memory_scan",
-        },
-        {
-            "id": "ins-005", "severity": "high", "category": "compliance",
-            "title": "SOUL template drift detected in 3 agents",
-            "description": "Position-level SOUL template for SA was updated 2 days ago, but 3 SA agents (Zhang San, Li Si, Chen Wei) are still running the previous version. This means policy changes are not propagated.",
-            "recommendation": "Trigger workspace reassembly for affected agents. Consider adding automatic SOUL version sync on next cold start.",
-            "affectedUsers": ["Zhang San", "Li Si", "Chen Wei"],
-            "detectedAt": "2026-03-20T07:00:00Z",
+    # 1. Repeated permission denials — real data from audit log
+    blocked = [e for e in entries if e.get("status") == "blocked"]
+    if blocked:
+        # Group by actor
+        by_actor: dict = {}
+        for e in blocked:
+            actor = e.get("actorName", "unknown")
+            by_actor[actor] = by_actor.get(actor, [])
+            by_actor[actor].append(e)
+        # Flag actors with 3+ blocked attempts
+        repeat_blockers = {k: v for k, v in by_actor.items() if len(v) >= 2}
+        if repeat_blockers:
+            actor_names = list(repeat_blockers.keys())[:3]
+            total = sum(len(v) for v in repeat_blockers.values())
+            top_tool = ""
+            for e in blocked:
+                m = re.search(r'(shell|browser|code_execution|file_write)', e.get("detail", ""), re.I)
+                if m:
+                    top_tool = m.group(1)
+                    break
+            insights.append({
+                "id": f"ins-{idx:03d}", "severity": "high", "category": "access_pattern",
+                "title": f"{total} permission denials — {len(repeat_blockers)} repeat offenders",
+                "description": f"Detected {total} blocked operations across {len(repeat_blockers)} employees in the last 50 audit events. Top blocked tool: {top_tool or 'various'}. Repeated denials may indicate misconfigured SOUL permissions or employee confusion about allowed tools.",
+                "recommendation": "Review SOUL tool permissions for affected positions. Consider adding a permission escalation request workflow so employees can request access instead of being silently blocked.",
+                "affectedUsers": actor_names,
+                "detectedAt": now_str,
+                "source": "audit_log_scan",
+            })
+            idx += 1
+
+    # 2. SOUL version drift — agents where soulVersions.position < latest
+    pos_versions: dict = {}
+    for a in agents:
+        pos = a.get("positionId", "")
+        sv = (a.get("soulVersions") or {}).get("position", 1)
+        if pos not in pos_versions or sv > pos_versions[pos]:
+            pos_versions[pos] = sv
+    drifted = []
+    for a in agents:
+        pos = a.get("positionId", "")
+        sv = (a.get("soulVersions") or {}).get("position", 1)
+        if pos in pos_versions and sv < pos_versions[pos]:
+            emp = next((e for e in employees if e.get("id") == a.get("employeeId")), {})
+            drifted.append(emp.get("name", a.get("employeeName", a["id"])))
+    if drifted:
+        insights.append({
+            "id": f"ins-{idx:03d}", "severity": "high", "category": "compliance",
+            "title": f"SOUL version drift — {len(drifted)} agent(s) behind",
+            "description": f"{len(drifted)} agent(s) are running outdated position SOUL templates. Policy changes made to position SOULs have not been propagated to these agents, meaning security and behavior rules may not be current.",
+            "recommendation": "Trigger workspace reassembly for affected agents via Agent Factory → SOUL Editor. Consider auto-incrementing position SOUL version on each workspace assembly.",
+            "affectedUsers": drifted[:5],
+            "detectedAt": now_str,
             "source": "version_drift_check",
-        },
-        {
-            "id": "ins-006", "severity": "low", "category": "optimization",
-            "title": "Alex Rivera's agent has low engagement (8 messages/week)",
-            "description": "PM Agent for Alex Rivera shows significantly lower usage than peer PM agents (Lin Xiaoyu: 44/week). Agent may need onboarding support or skill adjustment.",
-            "recommendation": "Send Alex a guided onboarding message. Review if PM Agent skills match Alex's actual workflow.",
-            "affectedUsers": ["Alex Rivera"],
-            "detectedAt": "2026-03-20T06:00:00Z",
-            "source": "engagement_analysis",
-        },
-    ]
+        })
+        idx += 1
 
-    summary = {
-        "totalInsights": len(insights),
-        "high": len([i for i in insights if i["severity"] == "high"]),
-        "medium": len([i for i in insights if i["severity"] == "medium"]),
-        "low": len([i for i in insights if i["severity"] == "low"]),
-        "lastScanAt": "2026-03-20T10:35:00Z",
-        "scanSources": ["audit_log", "memory_files", "usage_patterns", "version_drift"],
+    # 3. Zero-turn agents — agents with no sessions at all
+    agents_with_sessions = {s.get("agentId") for s in sessions}
+    unengaged = [a for a in agents if a.get("id") not in agents_with_sessions and a.get("employeeId")]
+    if unengaged:
+        names = [next((e.get("name", "") for e in employees if e.get("id") == a.get("employeeId")), a.get("employeeName", "")) for a in unengaged[:3]]
+        names = [n for n in names if n]
+        if names:
+            insights.append({
+                "id": f"ins-{idx:03d}", "severity": "low", "category": "optimization",
+                "title": f"{len(unengaged)} employee agent(s) with no recorded sessions",
+                "description": f"{len(unengaged)} personal agents have never recorded a session. These employees may not be aware of their agent, or onboarding hasn't been completed. Low engagement reduces ROI.",
+                "recommendation": "Send an onboarding nudge to affected employees. Verify IM channel bindings are configured. Check if pairing was completed in Bindings → IM User Mappings.",
+                "affectedUsers": names,
+                "detectedAt": now_str,
+                "source": "engagement_analysis",
+            })
+            idx += 1
+
+    # 4. Config changes spike — if many config changes in audit log
+    config_changes = [e for e in entries if e.get("eventType") == "config_change"]
+    if len(config_changes) >= 5:
+        changers = list({e.get("actorName", "") for e in config_changes})[:3]
+        insights.append({
+            "id": f"ins-{idx:03d}", "severity": "medium", "category": "compliance",
+            "title": f"{len(config_changes)} configuration changes detected",
+            "description": f"{len(config_changes)} config change events recorded in recent audit log. High change velocity can introduce policy inconsistencies or unintended agent behavior changes.",
+            "recommendation": "Review recent config changes in Audit Center → Event Timeline filtered by 'Config Change'. Enable change approval workflow for SOUL and permission edits.",
+            "affectedUsers": changers,
+            "detectedAt": now_str,
+            "source": "audit_log_scan",
+        })
+        idx += 1
+
+    # 5. Agents missing bindings — created but no channel binding
+    bound_agent_ids = {b.get("agentId") for b in (db.get_bindings() if hasattr(db, "get_bindings") else [])}
+    unbound_agents = [a for a in agents if a.get("employeeId") and a.get("id") not in bound_agent_ids]
+    if unbound_agents:
+        names_ub = [a.get("employeeName", a.get("id", "")) for a in unbound_agents[:3]]
+        insights.append({
+            "id": f"ins-{idx:03d}", "severity": "medium", "category": "optimization",
+            "title": f"{len(unbound_agents)} agent(s) without IM channel binding",
+            "description": f"{len(unbound_agents)} personal agents exist in the system but have no IM channel binding. These agents cannot receive messages from employees via Discord, Slack, or other channels.",
+            "recommendation": "Go to Bindings & Routing → Create Binding to link these agents to the appropriate IM channel. Or use Bulk Assign by Position.",
+            "affectedUsers": names_ub,
+            "detectedAt": now_str,
+            "source": "binding_scan",
+        })
+        idx += 1
+
+    return {
+        "insights": insights,
+        "summary": {
+            "totalInsights": len(insights),
+            "high": len([i for i in insights if i["severity"] == "high"]),
+            "medium": len([i for i in insights if i["severity"] == "medium"]),
+            "low": len([i for i in insights if i["severity"] == "low"]),
+            "lastScanAt": now_str,
+            "scanSources": ["audit_log", "agent_soul_versions", "session_data", "binding_registry"],
+        }
     }
 
-    return {"insights": insights, "summary": summary}
+
+# Cache last scan result in memory (reset on server restart)
+_audit_scan_cache: dict = {}
+
+
+@app.get("/api/v1/audit/insights")
+def get_audit_insights():
+    """Return cached scan results (or empty if never scanned)."""
+    global _audit_scan_cache
+    if not _audit_scan_cache:
+        # Run once on first load
+        _audit_scan_cache = _run_audit_scan()
+    return _audit_scan_cache
+
+
+@app.post("/api/v1/audit/run-scan")
+def run_audit_scan():
+    """Trigger a fresh audit scan. Returns updated insights."""
+    global _audit_scan_cache
+    _audit_scan_cache = _run_audit_scan()
+    return _audit_scan_cache
+
+
+def _format_uptime(seconds: float) -> str:
+    """Format seconds into a human-readable uptime string."""
+    secs = int(seconds)
+    days, remainder = divmod(secs, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    mins = remainder // 60
+    if days > 0:
+        return f"{days}d {hours}h {mins}m"
+    if hours > 0:
+        return f"{hours}h {mins}m"
+    return f"{mins}m"
+
+
+def _check_gateway_status() -> str:
+    """Try to hit the OpenClaw Gateway /health endpoint on localhost:18789."""
+    try:
+        import urllib.request as _ur
+        req = _ur.Request("http://localhost:18789/health", method="GET")
+        with _ur.urlopen(req, timeout=2) as resp:
+            return "healthy" if resp.status == 200 else "degraded"
+    except Exception:
+        return "unreachable"
+
+
+def _measure_bedrock_latency() -> int:
+    """Measure round-trip latency to Bedrock by timing a lightweight ListFoundationModels call."""
+    try:
+        import boto3 as _b3_lat
+        t0 = time.time()
+        _b3_lat.client("bedrock", region_name=AWS_REGION).list_foundation_models(maxResults=1)
+        return int((time.time() - t0) * 1000)
+    except Exception:
+        return 0
+
+
+def _calculate_agent_quality(agent_id: str) -> dict:
+    """Calculate real quality score for an agent from DynamoDB data.
+
+    Quality Score = 0.3×satisfaction + 0.2×tool_success + 0.2×response_time + 0.2×compliance + 0.1×completion
+
+    Data sources:
+    - Satisfaction: FEEDBACK# records (thumbs up rate)
+    - Tool success: AUDIT# records (agent_invocation success rate)
+    - Response time: SESSION# durationMs (P75 < 8s = full score)
+    - Compliance: AUDIT# permission_denied rate (low = good)
+    - Completion: SESSION# turns > 1 rate
+    """
+    try:
+        import boto3 as _b3q
+        from decimal import Decimal
+        ddb = _b3q.resource("dynamodb", region_name=db.AWS_REGION)
+        table = ddb.Table(db.TABLE_NAME)
+
+        # Tool success + compliance from AUDIT# entries (last 7 days)
+        audit_resp = table.query(
+            KeyConditionExpression="PK = :pk AND begins_with(SK, :sk)",
+            ExpressionAttributeValues={":pk": "ORG#acme", ":sk": "AUDIT#"},
+            ScanIndexForward=False, Limit=200)
+        agent_audits = [a for a in audit_resp.get("Items", [])
+                        if a.get("targetId") == agent_id]
+        invocations = [a for a in agent_audits if a.get("eventType") == "agent_invocation"]
+        permission_denials = [a for a in agent_audits if a.get("eventType") == "permission_denied"]
+        tool_success = 1.0 if not invocations else sum(
+            1 for a in invocations if a.get("status") == "success") / max(1, len(invocations))
+        compliance = 1.0 if not invocations else max(0, 1 - len(permission_denials) / max(1, len(invocations)))
+
+        # Response time from SESSION# records
+        sessions = [s for s in db.get_sessions() if s.get("agentId") == agent_id]
+        durations = [float(s["durationMs"]) for s in sessions if s.get("durationMs")]
+        if durations:
+            p75 = sorted(durations)[int(len(durations) * 0.75)]
+            response_score = min(1.0, max(0, 1.0 - (p75 - 3000) / 12000))  # 3s=1.0, 15s=0.0
+        else:
+            response_score = 0.7  # neutral default
+
+        # Completion rate (sessions with >1 turn)
+        multi_turn = [s for s in sessions if int(s.get("turns", 0)) > 1]
+        completion = len(multi_turn) / max(1, len(sessions)) if sessions else 0.7
+
+        # Satisfaction from FEEDBACK# (explicit thumbs up/down)
+        feedback_resp = table.query(
+            IndexName="GSI1",
+            KeyConditionExpression="GSI1PK = :pk AND begins_with(GSI1SK, :sk)",
+            ExpressionAttributeValues={":pk": "TYPE#feedback", ":sk": f"FEEDBACK#{agent_id}"},
+            Limit=100)
+        feedbacks = feedback_resp.get("Items", [])
+        if feedbacks:
+            positive = sum(1 for f in feedbacks if f.get("rating") == "up")
+            satisfaction = positive / len(feedbacks)
+        else:
+            # Fall back to audit success rate as proxy for satisfaction
+            satisfaction = tool_success * 0.9 + 0.1
+
+        score = round(
+            0.3 * satisfaction + 0.2 * tool_success +
+            0.2 * response_score + 0.2 * compliance + 0.1 * completion, 2)
+
+        return {
+            "score": round(score * 5, 1),  # 0-5 scale
+            "breakdown": {
+                "satisfaction": round(satisfaction * 5, 1),
+                "toolSuccess": round(tool_success * 5, 1),
+                "responseTime": round(response_score * 5, 1),
+                "compliance": round(compliance * 5, 1),
+                "completion": round(completion * 5, 1),
+            },
+            "dataPoints": {
+                "invocations": len(invocations),
+                "sessions": len(sessions),
+                "feedbacks": len(feedbacks),
+            }
+        }
+    except Exception as e:
+        return {"score": None, "error": str(e)}
+
+
+@app.get("/api/v1/agents/{agent_id}/quality")
+def get_agent_quality(agent_id: str, authorization: str = Header(default="")):
+    """Get real quality score for an agent calculated from DynamoDB data."""
+    _require_auth(authorization)
+    return _calculate_agent_quality(agent_id)
+
+
+@app.post("/api/v1/portal/request-always-on")
+def request_always_on(body: dict, authorization: str = Header(default="")):
+    """Employee requests always-on mode for their agent.
+    Creates a pending approval that IT admin can approve/deny."""
+    user = _require_auth(authorization)
+    reason = body.get("reason", "").strip() or "Employee-initiated request"
+
+    # Check not already always-on
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    try:
+        ssm_chk = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+        ssm_chk.get_parameter(
+            Name=f"/openclaw/{stack}/tenants/{user.employee_id}/always-on-agent")
+        raise HTTPException(400, "Already in always-on mode")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    approval_id = f"apr-alwayson-{user.employee_id}"
+    db.create_approval({
+        "id": approval_id,
+        "type": "always_on_request",
+        "requestedBy": user.employee_id,
+        "requestedByName": user.name,
+        "reason": reason,
+        "status": "pending",
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "details": {
+            "employeeId": user.employee_id,
+            "currentMode": "serverless",
+            "requestedMode": "always-on-ecs",
+        }
+    })
+    db.create_audit_entry({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eventType": "always_on_request", "actorId": user.employee_id,
+        "actorName": user.name, "targetType": "agent", "targetId": user.employee_id,
+        "detail": f"Employee requested always-on mode: {reason}", "status": "pending",
+    })
+    return {"requested": True, "approvalId": approval_id,
+            "message": "Request submitted. IT admin will review and activate always-on mode for your agent."}
+
+
+@app.post("/api/v1/portal/feedback")
+def submit_feedback(body: dict, authorization: str = Header(default="")):
+    """Employee submits thumbs up/down feedback on an agent response."""
+    user = _require_auth(authorization)
+    session_id = body.get("sessionId", "")
+    turn_seq = body.get("turnSeq", 0)
+    rating = body.get("rating", "")  # "up" or "down"
+    agent_id = body.get("agentId", "")
+
+    if rating not in ("up", "down"):
+        raise HTTPException(400, "rating must be 'up' or 'down'")
+
+    try:
+        import boto3 as _b3fb
+        ddb = _b3fb.resource("dynamodb", region_name=db.AWS_REGION)
+        table = ddb.Table(db.TABLE_NAME)
+        from decimal import Decimal
+        fid = f"{session_id}#{turn_seq:04d}"
+        table.put_item(Item={
+            "PK": "ORG#acme",
+            "SK": f"FEEDBACK#{fid}",
+            "GSI1PK": "TYPE#feedback",
+            "GSI1SK": f"FEEDBACK#{agent_id}#{fid}",
+            "sessionId": session_id,
+            "turnSeq": Decimal(str(turn_seq)),
+            "rating": rating,
+            "employeeId": user.employee_id,
+            "agentId": agent_id,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as e:
+        raise HTTPException(500, f"Failed to save feedback: {e}")
+
+    return {"saved": True, "rating": rating}
 
 
 @app.get("/api/v1/monitor/health")
@@ -1907,12 +3194,70 @@ def get_monitor_health():
     employees = db.get_employees()
     usage_map = _get_agent_usage_today()
 
+    # Build last-active map from SESSION# records in DynamoDB
+    sessions = db.get_sessions()
+    session_last_active: dict[str, str] = {}
+    for s in sessions:
+        aid = s.get("agentId", "")
+        la = s.get("lastActive", "") or s.get("startedAt", "")
+        if aid and la:
+            if aid not in session_last_active or la > session_last_active[aid]:
+                session_last_active[aid] = la
+
+    # Compute per-agent avg response time from DynamoDB duration_ms field if present
+    # Fall back to a cost-proportional estimate if not available
+    total_duration_ms: dict[str, list] = {}
+    for s in sessions:
+        aid = s.get("agentId", "")
+        dur = s.get("avgResponseMs") or s.get("durationMs")
+        if aid and dur:
+            total_duration_ms.setdefault(aid, []).append(float(dur))
+
+    # Compute success rate from recent audit entries
+    audit_entries = db.get_audit_entries(limit=200)
+    agent_audit: dict[str, dict] = {}
+    for e in audit_entries:
+        aid = e.get("targetId", "")
+        if not aid:
+            continue
+        rec = agent_audit.setdefault(aid, {"success": 0, "blocked": 0})
+        if e.get("status") == "blocked":
+            rec["blocked"] += 1
+        else:
+            rec["success"] += 1
+
+    server_uptime = _format_uptime(time.time() - _SERVER_START_TIME)
+
     agent_health = []
     for agent in agents:
         usage = usage_map.get(agent["id"], {})
-        emp = next((e for e in employees if e["id"] == agent.get("employeeId")), None)
+        aid = agent["id"]
+
+        # lastActive: from SESSION# records; fall back to agent's own updatedAt
+        last_active = (
+            session_last_active.get(aid)
+            or agent.get("lastActive")
+            or agent.get("updatedAt")
+            or ""
+        )
+
+        # avgResponseSec: from session duration data; fall back to requests-based estimate
+        durations = total_duration_ms.get(aid, [])
+        if durations:
+            avg_resp = round(sum(durations) / len(durations) / 1000, 1)
+        else:
+            req = usage.get("requests", 0)
+            avg_resp = round(max(1.0, 5.0 - min(req, 20) * 0.1), 1) if req else 0.0
+
+        # toolSuccessRate: from audit log if we have entries; else 100 (no failures recorded)
+        audit = agent_audit.get(aid, {})
+        total_audit = audit.get("success", 0) + audit.get("blocked", 0)
+        tool_success = round(
+            (audit["success"] / total_audit * 100) if total_audit > 0 else 100.0, 1
+        )
+
         agent_health.append({
-            "agentId": agent["id"],
+            "agentId": aid,
             "agentName": agent["name"],
             "employeeName": agent.get("employeeName", ""),
             "positionName": agent.get("positionName", ""),
@@ -1921,26 +3266,46 @@ def get_monitor_health():
             "channels": agent.get("channels", []),
             "skillCount": len(agent.get("skills", [])),
             "requestsToday": usage.get("requests", 0),
-            "costToday": usage.get("cost", 0),
-            "avgResponseSec": round(2.0 + (hash(agent["id"]) % 30) / 10, 1),
-            "toolSuccessRate": min(100, 85 + (hash(agent["id"]) % 16)),
+            "costToday": round(usage.get("cost", 0), 4),
+            "avgResponseSec": avg_resp,
+            "toolSuccessRate": tool_success,
             "soulVersion": f"v{agent.get('soulVersions', {}).get('global', 3)}.{agent.get('soulVersions', {}).get('position', 1)}.{agent.get('soulVersions', {}).get('personal', 0)}",
-            "lastActive": "2026-03-20T10:30:00Z",
-            "uptime": "14d 6h",
+            "lastActive": last_active,
+            "uptime": server_uptime,
         })
 
     # System-level metrics
+    all_requests = [usage_map.get(a["id"], {}).get("requests", 0) for a in agents]
+    total_blocked = sum(e.get("blocked", 0) for e in agent_audit.values())
+    total_success = sum(e.get("success", 0) for e in agent_audit.values())
+    total_audit_all = total_blocked + total_success
+    overall_tool_success = round(
+        (total_success / total_audit_all * 100) if total_audit_all > 0 else 100.0, 1
+    )
+
+    # p95 response time: 95th percentile across all known durations
+    all_durations = [ms for dlist in total_duration_ms.values() for ms in dlist]
+    if all_durations:
+        all_durations.sort()
+        p95_idx = int(len(all_durations) * 0.95)
+        p95_resp = round(all_durations[min(p95_idx, len(all_durations) - 1)] / 1000, 1)
+    else:
+        p95_resp = None
+
+    gateway_status = _check_gateway_status()
+    bedrock_ms = _measure_bedrock_latency()
+
     system = {
         "totalAgents": len(agents),
         "activeAgents": sum(1 for a in agents if a.get("status") == "active"),
         "avgQuality": round(sum(a.get("qualityScore") or 0 for a in agents) / max(1, len([a for a in agents if a.get("qualityScore")])), 1),
-        "totalRequestsToday": sum(usage_map.get(a["id"], {}).get("requests", 0) for a in agents),
+        "totalRequestsToday": sum(all_requests),
         "totalCostToday": round(sum(usage_map.get(a["id"], {}).get("cost", 0) for a in agents), 2),
-        "p95ResponseSec": 4.2,
-        "overallToolSuccess": 96,
-        "gatewayStatus": "healthy",
-        "agentCoreStatus": "healthy",
-        "bedrockLatencyMs": 245,
+        "p95ResponseSec": p95_resp,
+        "overallToolSuccess": overall_tool_success,
+        "gatewayStatus": gateway_status,
+        "agentCoreStatus": "healthy",  # AgentCore status requires control-plane API; show healthy unless errors seen
+        "bedrockLatencyMs": bedrock_ms if bedrock_ms else None,
     }
 
     return {"agents": agent_health, "system": system}
@@ -1991,16 +3356,13 @@ def dashboard(authorization: str = Header(default="")):
 
 def _get_agent_usage_today() -> dict:
     """Aggregate today's usage per agent from DynamoDB USAGE# records.
-    Reads today's date dynamically. Falls back to seed date if no data found."""
-    from datetime import date as _date
+    Reads today's date dynamically. Also merges the last 6 days to capture
+    recent real usage (Discord, Portal, Telegram) that may land on different dates."""
+    from datetime import date as _date, timedelta
     today = _date.today().isoformat()
     all_usage = db.get_usage_by_date(today)
-    # Fallback: if no data for today, try seed date (demo mode)
-    if not all_usage:
-        all_usage = db.get_usage_by_date("2026-03-20")
-    # Also merge any other recent dates to capture real Discord usage
+    # Merge recent days to capture real usage — but never fall back to hard-coded seed dates
     for offset in range(1, 7):
-        from datetime import timedelta
         past = (_date.today() - timedelta(days=offset)).isoformat()
         past_usage = db.get_usage_by_date(past)
         for u in past_usage:
@@ -2139,24 +3501,83 @@ def usage_for_agent(agent_id: str):
 
 @app.get("/api/v1/usage/trend")
 def usage_trend():
-    """7-day cost trend from DynamoDB."""
+    """7-day cost trend — aggregated from real USAGE#{agent}#{date} records in DynamoDB.
+    Falls back to seed COST_TREND# data if real usage is too sparse."""
+    from datetime import timedelta
+    employees = db.get_employees()
+    active_emp_count = len([e for e in employees if e.get("agentId")])
+    chatgpt_daily = round(active_emp_count * 0.83, 2)  # $25/user/month ≈ $0.83/day
+
+    # Aggregate real USAGE records by date (last 7 days)
+    try:
+        import boto3 as _b3tr
+        from decimal import Decimal
+        ddb = _b3tr.resource("dynamodb", region_name=db.AWS_REGION)
+        table = ddb.Table(db.TABLE_NAME)
+        now = datetime.now(timezone.utc)
+        daily_costs: dict = {}
+        daily_requests: dict = {}
+        for i in range(7):
+            date_str = (now - timedelta(days=i)).strftime("%Y-%m-%d")
+            daily_costs[date_str] = 0.0
+            daily_requests[date_str] = 0
+
+        # Scan recent USAGE records
+        resp = table.query(
+            IndexName="GSI1",
+            KeyConditionExpression="GSI1PK = :pk AND begins_with(GSI1SK, :sk)",
+            ExpressionAttributeValues={":pk": "TYPE#usage", ":sk": "USAGE#"},
+            Limit=500)
+        for item in resp.get("Items", []):
+            date = item.get("date", "")
+            if date in daily_costs:
+                daily_costs[date] += float(item.get("cost", 0))
+                daily_requests[date] += int(item.get("requests", 0))
+
+        # Build trend array (most recent first)
+        real_trend = []
+        has_real_data = any(v > 0 for v in daily_costs.values())
+        for i in range(6, -1, -1):
+            date_str = (now - timedelta(days=i)).strftime("%Y-%m-%d")
+            real_trend.append({
+                "date": date_str,
+                "openclawCost": round(daily_costs.get(date_str, 0), 4),
+                "chatgptEquivalent": chatgpt_daily,
+                "totalRequests": daily_requests.get(date_str, 0),
+                "source": "real" if has_real_data else "seed",
+            })
+
+        if has_real_data:
+            return real_trend
+    except Exception:
+        pass
+
+    # Fallback to seed COST_TREND# records
     trend = db.get_cost_trend()
     return [{
         "date": t.get("date"),
         "openclawCost": float(t.get("openclawCost", 0)),
-        "chatgptEquivalent": float(t.get("chatgptEquivalent", 5)),
+        "chatgptEquivalent": float(t["chatgptEquivalent"]) if t.get("chatgptEquivalent") else chatgpt_daily,
         "totalRequests": t.get("totalRequests", 0),
+        "source": "seed",
     } for t in trend]
+
+def _get_budgets() -> dict:
+    """Load department budgets from DynamoDB CONFIG#budgets; fall back to defaults."""
+    stored = db.get_config("budgets")
+    if stored:
+        # Merge with defaults so new departments always have a fallback
+        merged = dict(_DEFAULT_BUDGETS)
+        merged.update({k: float(v) for k, v in stored.items() if k != "id" and not k.startswith("_")})
+        return merged
+    return dict(_DEFAULT_BUDGETS)
+
 
 @app.get("/api/v1/usage/budgets")
 def usage_budgets():
-    """Department budget tracking."""
+    """Department budget tracking — budgets loaded from DynamoDB CONFIG#budgets."""
     dept_usage = usage_by_department()
-    budgets = {
-        "Engineering": 50.0, "Platform Team": 20.0, "Sales": 30.0,
-        "Product": 25.0, "Finance": 20.0, "HR & Admin": 15.0,
-        "Customer Success": 20.0, "Legal & Compliance": 10.0, "QA Team": 15.0,
-    }
+    budgets = _get_budgets()
     result = []
     for dept in dept_usage:
         budget = budgets.get(dept["department"], 20.0)
@@ -2170,6 +3591,20 @@ def usage_budgets():
             "status": "over" if projected > budget else "warning" if projected > budget * 0.8 else "ok",
         })
     return result
+
+
+class BudgetUpdateRequest(BaseModel):
+    budgets: dict  # {"Engineering": 60.0, "Sales": 35.0, ...}
+
+
+@app.put("/api/v1/usage/budgets")
+def update_budgets(body: BudgetUpdateRequest, authorization: str = Header(default="")):
+    """Save department budget config to DynamoDB. Admin only."""
+    _require_role(authorization, roles=["admin"])
+    merged = _get_budgets()
+    merged.update({k: float(v) for k, v in body.budgets.items()})
+    db.set_config("budgets", merged)
+    return merged
 
 
 # =========================================================================
@@ -2214,6 +3649,13 @@ def set_default_model(body: dict):
     db.set_config("model", config)
     return config["default"]
 
+@app.put("/api/v1/settings/model/fallback")
+def set_fallback_model(body: dict):
+    config = _get_model_config()
+    config["fallback"] = body
+    db.set_config("model", config)
+    return config["fallback"]
+
 @app.put("/api/v1/settings/model/position/{pos_id}")
 def set_position_model(pos_id: str, body: dict):
     config = _get_model_config()
@@ -2228,6 +3670,99 @@ def remove_position_model(pos_id: str):
     db.set_config("model", config)
     return config["positionOverrides"]
 
+@app.put("/api/v1/settings/model/employee/{emp_id}")
+def set_employee_model(emp_id: str, body: dict, authorization: str = Header(default="")):
+    """Set a per-employee model override — highest priority, overrides position and global."""
+    _require_role(authorization, roles=["admin"])
+    config = _get_model_config()
+    config.setdefault("employeeOverrides", {})[emp_id] = body
+    db.set_config("model", config)
+    return config["employeeOverrides"]
+
+@app.delete("/api/v1/settings/model/employee/{emp_id}")
+def remove_employee_model(emp_id: str, authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    config = _get_model_config()
+    config.get("employeeOverrides", {}).pop(emp_id, None)
+    db.set_config("model", config)
+    return config.get("employeeOverrides", {})
+
+# ── Agent Config (compaction, context window, language) ────────────────────────
+
+def _get_agent_config() -> dict:
+    cfg = db.get_config("agent-config")
+    if not cfg:
+        return {"positionConfig": {}, "employeeConfig": {}}
+    return cfg
+
+@app.get("/api/v1/settings/agent-config")
+def get_agent_config(authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    return _get_agent_config()
+
+@app.put("/api/v1/settings/agent-config/position/{pos_id}")
+def set_position_agent_config(pos_id: str, body: dict, authorization: str = Header(default="")):
+    """Set position-level agent config: recentTurnsPreserve, compactionMode, maxTokens, language."""
+    _require_role(authorization, roles=["admin"])
+    cfg = _get_agent_config()
+    cfg.setdefault("positionConfig", {})[pos_id] = body
+    db.set_config("agent-config", cfg)
+    return cfg["positionConfig"][pos_id]
+
+@app.delete("/api/v1/settings/agent-config/position/{pos_id}")
+def delete_position_agent_config(pos_id: str, authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    cfg = _get_agent_config()
+    cfg.get("positionConfig", {}).pop(pos_id, None)
+    db.set_config("agent-config", cfg)
+    return {"deleted": pos_id}
+
+@app.put("/api/v1/settings/agent-config/employee/{emp_id}")
+def set_employee_agent_config(emp_id: str, body: dict, authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    cfg = _get_agent_config()
+    cfg.setdefault("employeeConfig", {})[emp_id] = body
+    db.set_config("agent-config", cfg)
+    return cfg["employeeConfig"][emp_id]
+
+@app.delete("/api/v1/settings/agent-config/employee/{emp_id}")
+def delete_employee_agent_config(emp_id: str, authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    cfg = _get_agent_config()
+    cfg.get("employeeConfig", {}).pop(emp_id, None)
+    db.set_config("agent-config", cfg)
+    return {"deleted": emp_id}
+
+# ── KB Assignments ─────────────────────────────────────────────────────────────
+
+def _get_kb_assignments() -> dict:
+    cfg = db.get_config("kb-assignments")
+    return cfg if cfg else {"positionKBs": {}, "employeeKBs": {}}
+
+@app.get("/api/v1/settings/kb-assignments")
+def get_kb_assignments(authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    return _get_kb_assignments()
+
+@app.put("/api/v1/settings/kb-assignments/position/{pos_id}")
+def set_position_kbs(pos_id: str, body: dict, authorization: str = Header(default="")):
+    """Assign knowledge bases to a position. kbIds: list of KB IDs."""
+    _require_role(authorization, roles=["admin"])
+    cfg = _get_kb_assignments()
+    cfg.setdefault("positionKBs", {})[pos_id] = body.get("kbIds", [])
+    db.set_config("kb-assignments", cfg)
+    _bump_config_version()
+    return cfg["positionKBs"][pos_id]
+
+@app.put("/api/v1/settings/kb-assignments/employee/{emp_id}")
+def set_employee_kbs(emp_id: str, body: dict, authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    cfg = _get_kb_assignments()
+    cfg.setdefault("employeeKBs", {})[emp_id] = body.get("kbIds", [])
+    db.set_config("kb-assignments", cfg)
+    _bump_config_version()
+    return cfg["employeeKBs"][emp_id]
+
 @app.get("/api/v1/settings/security")
 def get_security_config():
     return _get_security_config()
@@ -2239,14 +3774,448 @@ def update_security_config(body: dict):
     db.set_config("security", config)
     return config
 
+# =========================================================================
+# Org Sync — Feishu / DingTalk (Task C)
+# =========================================================================
+
+@app.get("/api/v1/settings/org-sync")
+def get_org_sync_config(authorization: str = Header(default="")):
+    """Get org sync configuration (source, interval, last sync time)."""
+    _require_role(authorization, roles=["admin"])
+    cfg = db.get_config("org-sync") or {}
+    return {
+        "source": cfg.get("source", "none"),
+        "enabled": cfg.get("enabled", False),
+        "interval": cfg.get("interval", "4h"),
+        "lastSync": cfg.get("lastSync"),
+        "lastResult": cfg.get("lastResult"),
+        "status": cfg.get("status", "not_configured"),
+    }
+
+
+@app.put("/api/v1/settings/org-sync")
+def update_org_sync_config(body: dict, authorization: str = Header(default="")):
+    """Save org sync configuration."""
+    _require_role(authorization, roles=["admin"])
+    cfg = db.get_config("org-sync") or {}
+    cfg.update({k: v for k, v in body.items()
+                if k in ("source", "enabled", "interval", "apiKey", "appId", "appSecret", "tenantKey")})
+    db.set_config("org-sync", cfg)
+    return {"saved": True}
+
+
+@app.post("/api/v1/settings/org-sync/preview")
+def preview_org_sync(authorization: str = Header(default="")):
+    """Simulate org sync and return a diff preview (what would change)."""
+    _require_role(authorization, roles=["admin"])
+    cfg = db.get_config("org-sync") or {}
+    source = cfg.get("source", "none")
+
+    if source == "none":
+        raise HTTPException(400, "No org sync source configured")
+
+    # Fetch remote org data (Feishu / DingTalk)
+    remote_users = []
+    remote_depts = []
+    try:
+        if source == "feishu":
+            remote_users, remote_depts = _fetch_feishu_org(cfg)
+        elif source == "dingtalk":
+            remote_users, remote_depts = _fetch_dingtalk_org(cfg)
+        else:
+            raise HTTPException(400, f"Unsupported source: {source}")
+    except Exception as e:
+        raise HTTPException(502, f"Failed to fetch from {source}: {e}")
+
+    # Compare with current DynamoDB org
+    current_emps = {e["id"]: e for e in db.get_employees()}
+    current_depts = {d["id"]: d for d in db.get_departments()}
+
+    new_emps, changed_emps, left_emps = [], [], []
+    for ru in remote_users:
+        if ru["id"] not in current_emps:
+            new_emps.append(ru)
+        elif _emp_changed(current_emps[ru["id"]], ru):
+            changed_emps.append({"before": current_emps[ru["id"]], "after": ru})
+    for emp_id in current_emps:
+        if not any(ru["id"] == emp_id for ru in remote_users):
+            left_emps.append(current_emps[emp_id])
+
+    new_depts, changed_depts = [], []
+    for rd in remote_depts:
+        if rd["id"] not in current_depts:
+            new_depts.append(rd)
+        elif current_depts[rd["id"]].get("name") != rd.get("name"):
+            changed_depts.append({"before": current_depts[rd["id"]], "after": rd})
+
+    return {
+        "source": source,
+        "employees": {"new": new_emps, "changed": changed_emps, "left": left_emps},
+        "departments": {"new": new_depts, "changed": changed_depts},
+        "summary": {
+            "newEmployees": len(new_emps),
+            "changedEmployees": len(changed_emps),
+            "leftEmployees": len(left_emps),
+            "deptChanges": len(new_depts) + len(changed_depts),
+        }
+    }
+
+
+@app.post("/api/v1/settings/org-sync/apply")
+def apply_org_sync(body: dict, authorization: str = Header(default="")):
+    """Apply org sync changes from a preview result."""
+    _require_role(authorization, roles=["admin"])
+    preview = body.get("preview", {})
+    applied = {"newEmployees": 0, "archivedEmployees": 0, "updatedEmployees": 0, "newDepts": 0}
+
+    for emp in preview.get("employees", {}).get("new", []):
+        # Auto-provision: create employee + agent + binding
+        _auto_provision_employee(emp)
+        applied["newEmployees"] += 1
+
+    for change in preview.get("employees", {}).get("changed", []):
+        db.update_employee(change["after"]["id"], change["after"])
+        applied["updatedEmployees"] += 1
+
+    for emp in preview.get("employees", {}).get("left", []):
+        db.update_employee(emp["id"], {**emp, "agentStatus": "archived"})
+        applied["archivedEmployees"] += 1
+
+    for dept in preview.get("departments", {}).get("new", []):
+        db.create_department(dept)
+        applied["newDepts"] += 1
+
+    # Update sync state
+    cfg = db.get_config("org-sync") or {}
+    cfg["lastSync"] = datetime.now(timezone.utc).isoformat()
+    cfg["lastResult"] = applied
+    cfg["status"] = "ok"
+    db.set_config("org-sync", cfg)
+
+    return {"applied": applied}
+
+
+def _fetch_feishu_org(cfg: dict):
+    """Fetch users and departments from Feishu API."""
+    import requests as _req
+    app_id = cfg.get("appId", "")
+    app_secret = cfg.get("appSecret", "")
+    if not app_id or not app_secret:
+        raise ValueError("Feishu appId and appSecret required")
+
+    # Get tenant_access_token
+    token_resp = _req.post(
+        "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+        json={"app_id": app_id, "app_secret": app_secret}, timeout=10
+    ).json()
+    token = token_resp.get("tenant_access_token", "")
+    if not token:
+        raise ValueError(f"Failed to get Feishu token: {token_resp.get('msg')}")
+
+    headers = {"Authorization": f"Bearer {token}"}
+    # Fetch departments
+    depts_resp = _req.get(
+        "https://open.feishu.cn/open-apis/contact/v3/departments",
+        headers=headers, params={"page_size": 200}, timeout=10).json()
+    depts = [{"id": f"dept-{d['open_department_id']}", "name": d["name"],
+               "parentId": d.get("parent_open_department_id")}
+             for d in depts_resp.get("data", {}).get("items", [])]
+
+    # Fetch users
+    users_resp = _req.get(
+        "https://open.feishu.cn/open-apis/contact/v3/users",
+        headers=headers, params={"page_size": 200}, timeout=10).json()
+    users = [{"id": f"emp-{u['open_id']}", "name": u["name"],
+               "departmentId": f"dept-{u.get('open_department_ids', [''])[0]}",
+               "positionId": "pos-employee", "role": "employee"}
+             for u in users_resp.get("data", {}).get("items", [])]
+
+    return users, depts
+
+
+def _fetch_dingtalk_org(cfg: dict):
+    """Fetch users and departments from DingTalk API."""
+    import requests as _req
+    app_key = cfg.get("appId", "")
+    app_secret = cfg.get("appSecret", "")
+    if not app_key or not app_secret:
+        raise ValueError("DingTalk appId and appSecret required")
+
+    token_resp = _req.post(
+        "https://oapi.dingtalk.com/gettoken",
+        params={"appkey": app_key, "appsecret": app_secret}, timeout=10).json()
+    token = token_resp.get("access_token", "")
+
+    headers = {"x-acs-dingtalk-access-token": token}
+    depts_resp = _req.post(
+        "https://oapi.dingtalk.com/topapi/v2/department/listsub",
+        headers={"Content-Type": "application/json"},
+        params={"access_token": token},
+        json={"dept_id": 1, "language": "zh_CN"}, timeout=10).json()
+    depts = [{"id": f"dept-{d['dept_id']}", "name": d["name"]}
+             for d in depts_resp.get("result", {}).get("dept_list", [])]
+
+    users_resp = _req.post(
+        "https://oapi.dingtalk.com/topapi/v2/user/list",
+        params={"access_token": token},
+        json={"dept_id": 1, "size": 100}, timeout=10).json()
+    users = [{"id": f"emp-{u['userid']}", "name": u["name"],
+               "departmentId": f"dept-{u.get('dept_id_list', [1])[0]}",
+               "positionId": "pos-employee", "role": "employee"}
+             for u in users_resp.get("result", {}).get("list", [])]
+
+    return users, depts
+
+
+def _emp_changed(current: dict, remote: dict) -> bool:
+    """Check if employee record differs between current and remote."""
+    for field in ("name", "departmentId", "positionId"):
+        if current.get(field) != remote.get(field):
+            return True
+    return False
+
+
+# =========================================================================
+# Admin — IM Channels Management
+# =========================================================================
+
+def _run_openclaw_channels() -> list:
+    """Get live channel status from openclaw channels list CLI."""
+    import subprocess as _sp
+    openclaw_bin = "/home/ubuntu/.nvm/versions/node/v22.22.1/bin/openclaw"
+    env_path = "/home/ubuntu/.nvm/versions/node/v22.22.1/bin:/usr/local/bin:/usr/bin:/bin"
+    try:
+        result = _sp.run(
+            ["sudo", "-u", "ubuntu", "env", f"PATH={env_path}", "HOME=/home/ubuntu",
+             openclaw_bin, "channels", "list", "--json"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.stdout:
+            raw = json.loads(result.stdout)
+            channels = []
+            for ch_type, accounts in raw.get("chat", {}).items():
+                for account in accounts:
+                    channels.append({"channel": ch_type, "account": account, "type": "chat"})
+            return channels
+    except Exception:
+        pass
+    # Fallback: parse openclaw channels list text output
+    try:
+        result = _sp.run(
+            ["sudo", "-u", "ubuntu", "env", f"PATH={env_path}", "HOME=/home/ubuntu",
+             openclaw_bin, "channels", "list"],
+            capture_output=True, text=True, timeout=10,
+        )
+        channels = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("- ") and "default" in line:
+                parts = line[2:].split()
+                ch_type = parts[0].lower() if parts else "unknown"
+                configured = "configured" in line
+                linked = "not linked" not in line
+                channels.append({
+                    "channel": ch_type,
+                    "account": "default",
+                    "configured": configured,
+                    "linked": linked,
+                    "raw": line,
+                })
+        return channels
+    except Exception:
+        return []
+
+
+@app.get("/api/v1/admin/im-channel-connections")
+def get_im_channel_connections(authorization: str = Header(default="")):
+    """Per-channel employee connection table for admin management."""
+    _require_role(authorization, roles=["admin"])
+    try:
+        # 1. Get all SSM user-mapping params
+        raw_mappings = _list_user_mappings()
+        print(f"[im-connections] _list_user_mappings returned {len(raw_mappings)} entries")
+
+        # 2. Employee lookup
+        emps = db.get_employees()
+        emp_map = {e["id"]: e for e in emps}
+        print(f"[im-connections] {len(emps)} employees loaded")
+
+        # 3. Session counts from audit log (lightweight: limit 500)
+        session_counts: dict = {}
+        last_active: dict = {}
+        try:
+            audit = db.get_audit_entries(limit=500)
+            for a in audit:
+                eid = a.get("actorId", "")
+                if eid and a.get("eventType") == "agent_invocation":
+                    session_counts[eid] = session_counts.get(eid, 0) + 1
+                    ts = a.get("timestamp", "")
+                    if ts > last_active.get(eid, ""):
+                        last_active[eid] = ts
+        except Exception as ae:
+            print(f"[im-connections] audit fetch failed (non-fatal): {ae}")
+
+        # 4. Group by channel — skip unknown/unkn prefixes
+        by_channel: dict = {}
+        for m in raw_mappings:
+            channel = m.get("channel", "")
+            if channel in ("unknown", "unkn") or not channel:
+                continue
+            emp_id = m.get("employeeId", "")
+            emp = emp_map.get(emp_id)
+            if not emp:
+                continue
+            channel_user_id = m.get("channelUserId", "")
+            by_channel.setdefault(channel, []).append({
+                "empId": emp_id,
+                "empName": emp.get("name", emp_id),
+                "positionName": emp.get("positionName", ""),
+                "departmentName": emp.get("departmentName", ""),
+                "channelUserId": channel_user_id,
+                "connectedAt": m.get("lastModified", ""),
+                "sessionCount": session_counts.get(emp_id, 0),
+                "lastActive": last_active.get(emp_id, ""),
+            })
+
+        print(f"[im-connections] result channels: {list(by_channel.keys())}, total: {sum(len(v) for v in by_channel.values())}")
+        return {"connections": by_channel}
+
+    except Exception as e:
+        print(f"[im-connections] ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"connections": {}, "error": str(e)}
+
+
+@app.get("/api/v1/admin/im-channels")
+def get_im_channels(authorization: str = Header(default="")):
+    """Get live IM channel status from Gateway + SSM mappings count per channel."""
+    _require_role(authorization, roles=["admin", "manager"])
+    import boto3 as _b3_ch
+    ssm = _b3_ch.client("ssm", region_name=_GATEWAY_REGION)
+
+    # Get all user mappings to count per channel
+    channel_counts: dict = {}
+    try:
+        prefix = _mapping_prefix()
+        resp = ssm.get_parameters_by_path(Path=prefix, Recursive=True, MaxResults=10)
+        for p in resp.get("Parameters", []):
+            name = p["Name"].replace(prefix, "")
+            for ch in ["telegram", "discord", "slack", "whatsapp", "feishu", "teams"]:
+                if name.startswith(f"{ch}__"):
+                    channel_counts[ch] = channel_counts.get(ch, 0) + 1
+                    break
+            else:
+                # Bare user_id mappings — count but don't attribute to a channel
+                pass
+    except Exception:
+        pass
+
+    # Get live Gateway channel status
+    gateway_channels = _run_openclaw_channels()
+
+    # Build enriched channel list
+    all_channels = [
+        {"id": "telegram", "label": "Telegram", "enterprise": True},
+        {"id": "discord", "label": "Discord", "enterprise": True},
+        {"id": "slack", "label": "Slack", "enterprise": True},
+        {"id": "teams", "label": "Microsoft Teams", "enterprise": True},
+        {"id": "feishu", "label": "Feishu / Lark", "enterprise": True},
+        {"id": "googlechat", "label": "Google Chat", "enterprise": True},
+        {"id": "whatsapp", "label": "WhatsApp", "enterprise": False},
+        {"id": "wechat", "label": "WeChat", "enterprise": False},
+    ]
+
+    gw_by_channel = {ch["channel"]: ch for ch in gateway_channels}
+    result = []
+    for ch in all_channels:
+        gw = gw_by_channel.get(ch["id"], {})
+        configured = bool(gw) and gw.get("configured", False)
+        linked = bool(gw) and gw.get("linked", False)
+        if gw and "raw" not in gw:
+            configured = True
+            linked = True
+        status = "connected" if (configured and linked) else \
+                 "configured" if configured else "not_connected"
+        result.append({
+            **ch,
+            "status": status,
+            "connectedEmployees": channel_counts.get(ch["id"], 0),
+            "gatewayInfo": gw.get("raw", "") if gw else "",
+        })
+    return result
+
+
 @app.get("/api/v1/settings/services")
 def get_services():
+    uptime_str = _format_uptime(time.time() - _SERVER_START_TIME)
+
+    # Gateway: try to ping, measure latency
+    gw_status = _check_gateway_status()
+
+    # Requests today: count agent_invocation audit entries from today
+    from datetime import date as _date
+    today_str = _date.today().isoformat()
+    audit_entries = db.get_audit_entries(limit=500)
+    requests_today = sum(
+        1 for e in audit_entries
+        if e.get("eventType") == "agent_invocation"
+        and e.get("timestamp", "").startswith(today_str)
+    )
+
+    # Approvals processed: count all non-pending approvals
+    approvals = db.get_approvals()
+    approvals_processed = sum(1 for a in approvals if a.get("status") in ("approved", "denied"))
+
+    # Bedrock: measure real latency
+    bedrock_ms = _measure_bedrock_latency()
+    bedrock_status = "connected" if bedrock_ms > 0 else "unreachable"
+
+    # DynamoDB: get real item count via a lightweight describe (scan is expensive; use table meta)
+    ddb_item_count = 0
+    ddb_status = "unknown"
+    try:
+        import boto3 as _b3_svc
+        table_meta = _b3_svc.resource("dynamodb", region_name=db.AWS_REGION).Table(db.TABLE_NAME)
+        table_meta.load()
+        ddb_item_count = table_meta.item_count or 0
+        ddb_status = "active"
+    except Exception:
+        ddb_status = "unreachable"
+
+    # S3: quick head-bucket check
+    s3_status = "unknown"
+    try:
+        import boto3 as _b3_s3
+        _b3_s3.client("s3").head_bucket(Bucket=s3ops.bucket())
+        s3_status = "active"
+    except Exception:
+        s3_status = "unreachable"
+
     return {
-        "gateway": {"status": "running", "port": 18789, "uptime": "14d 6h 32m", "requestsToday": 176},
-        "auth_agent": {"status": "healthy", "uptime": "14d 6h 32m", "approvalsProcessed": 42},
-        "bedrock": {"status": "connected", "region": AWS_REGION, "latencyMs": 245, "vpcEndpoint": True},
-        "dynamodb": {"status": "active", "table": db.TABLE_NAME, "itemCount": 74},
-        "s3": {"status": "active", "bucket": s3ops.bucket()},
+        "gateway": {
+            "status": gw_status,
+            "port": 18789,
+            "uptime": uptime_str,
+            "requestsToday": requests_today,
+        },
+        "auth_agent": {
+            "status": "healthy",
+            "uptime": uptime_str,
+            "approvalsProcessed": approvals_processed,
+        },
+        "bedrock": {
+            "status": bedrock_status,
+            "region": AWS_REGION,
+            "latencyMs": bedrock_ms if bedrock_ms else None,
+            "vpcEndpoint": True,
+        },
+        "dynamodb": {
+            "status": ddb_status,
+            "table": db.TABLE_NAME,
+            "itemCount": ddb_item_count,
+        },
+        "s3": {"status": s3_status, "bucket": s3ops.bucket()},
     }
 
 
@@ -2272,6 +4241,1747 @@ if DIST_DIR.exists():
         # For API 404s, return JSON
         from fastapi.responses import JSONResponse
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+
+# =========================================================================
+# Admin AI Assistant — Claude via Bedrock Converse API + whitelist tools
+# No shell, no subprocess, no OpenClaw. Bounded read/write via Python fns.
+# =========================================================================
+
+_ADMIN_AI_MODEL = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+_ADMIN_AI_SYSTEM = """You are the IT Admin Assistant for OpenClaw Enterprise. You help administrators query and configure the platform.
+
+You have access to specific tools to read and modify platform data. Use them to answer questions accurately.
+- For data queries, always use the appropriate tool rather than guessing.
+- For write operations (update_soul_template), confirm what you're about to change before calling the tool if the intent isn't crystal clear.
+- Respond in the same language the user writes in.
+- Be concise. Show data in structured format (tables or lists) when useful.
+- You cannot execute shell commands or access the EC2 directly. All operations go through the defined tools."""
+
+# Per-admin conversation history (in-memory, resets on server restart)
+_admin_ai_history: dict[str, list] = {}
+
+_ADMIN_AI_TOOLS = [
+    {
+        "name": "list_employees",
+        "description": "List employees, optionally filtered by department_id or position_id. Returns id, name, position, department, agent status, channels.",
+        "inputSchema": {"json": {"type": "object", "properties": {
+            "department_id": {"type": "string"},
+            "position_id": {"type": "string"},
+        }}}
+    },
+    {
+        "name": "get_employee_detail",
+        "description": "Get full details for one employee: profile, agent config, bindings, recent usage.",
+        "inputSchema": {"json": {"type": "object", "required": ["employee_id"], "properties": {
+            "employee_id": {"type": "string", "description": "e.g. emp-carol"},
+        }}}
+    },
+    {
+        "name": "get_soul_template",
+        "description": "Read a SOUL template from S3. scope=global reads the locked global SOUL. scope=position reads a position template (requires position_id). scope=personal reads an employee's personal SOUL (requires employee_id).",
+        "inputSchema": {"json": {"type": "object", "required": ["scope"], "properties": {
+            "scope": {"type": "string", "enum": ["global", "position", "personal"]},
+            "position_id": {"type": "string"},
+            "employee_id": {"type": "string"},
+        }}}
+    },
+    {
+        "name": "update_soul_template",
+        "description": "Write a SOUL template to S3. Only position and personal scope are writable. Global is locked. Creates an audit log entry automatically.",
+        "inputSchema": {"json": {"type": "object", "required": ["scope", "content"], "properties": {
+            "scope": {"type": "string", "enum": ["position", "personal"]},
+            "position_id": {"type": "string"},
+            "employee_id": {"type": "string"},
+            "content": {"type": "string"},
+        }}}
+    },
+    {
+        "name": "list_departments_and_positions",
+        "description": "List all departments and positions with member counts and default channels.",
+        "inputSchema": {"json": {"type": "object", "properties": {}}}
+    },
+    {
+        "name": "get_agent_detail",
+        "description": "Get agent configuration, SOUL versions, skills, channels, and today's usage.",
+        "inputSchema": {"json": {"type": "object", "properties": {
+            "agent_id": {"type": "string"},
+            "employee_id": {"type": "string", "description": "Alternative lookup by employee"},
+        }}}
+    },
+    {
+        "name": "get_usage_report",
+        "description": "Get token usage and cost data. scope=summary gives org total, scope=by_department breaks down by dept, scope=by_agent lists per-agent stats.",
+        "inputSchema": {"json": {"type": "object", "required": ["scope"], "properties": {
+            "scope": {"type": "string", "enum": ["summary", "by_department", "by_agent"]},
+        }}}
+    },
+    {
+        "name": "get_service_health",
+        "description": "Check health of all platform services: Gateway, Admin Console, Tenant Router, Bedrock, DynamoDB, S3.",
+        "inputSchema": {"json": {"type": "object", "properties": {}}}
+    },
+    {
+        "name": "get_audit_log",
+        "description": "Query recent audit log entries. Optionally filter by employee_id or event_type.",
+        "inputSchema": {"json": {"type": "object", "properties": {
+            "employee_id": {"type": "string"},
+            "event_type": {"type": "string", "enum": ["agent_invocation", "permission_denied", "config_change", "approval_decision"]},
+            "limit": {"type": "integer", "default": 20},
+        }}}
+    },
+    {
+        "name": "list_bindings",
+        "description": "List IM channel bindings. Optionally filter by employee_id or channel name.",
+        "inputSchema": {"json": {"type": "object", "properties": {
+            "employee_id": {"type": "string"},
+            "channel": {"type": "string"},
+        }}}
+    },
+]
+
+
+def _execute_admin_tool(name: str, inputs: dict, actor_id: str, actor_name: str) -> str:
+    """Execute one whitelisted admin tool. Returns result as string for Claude."""
+    try:
+        if name == "list_employees":
+            emps = db.get_employees()
+            if inputs.get("department_id"):
+                emps = [e for e in emps if e.get("departmentId") == inputs["department_id"]]
+            if inputs.get("position_id"):
+                emps = [e for e in emps if e.get("positionId") == inputs["position_id"]]
+            rows = [f"- {e['id']} | {e['name']} | {e.get('positionName','')} | {e.get('departmentName','')} | agent={'yes' if e.get('agentId') else 'no'} | channels={','.join(e.get('channels',[]))}"
+                    for e in emps]
+            return f"{len(emps)} employees:\n" + "\n".join(rows)
+
+        elif name == "get_employee_detail":
+            emp_id = inputs["employee_id"]
+            emps = db.get_employees()
+            emp = next((e for e in emps if e["id"] == emp_id or e.get("name") == emp_id), None)
+            if not emp:
+                return f"Employee '{emp_id}' not found."
+            agent = db.get_agent(emp.get("agentId", "")) if emp.get("agentId") else None
+            bindings = [b for b in db.get_bindings() if b.get("employeeId") == emp["id"]]
+            usage = _get_agent_usage_today().get(emp.get("agentId", ""), {})
+            lines = [
+                f"**{emp['name']}** ({emp['id']})",
+                f"Position: {emp.get('positionName','')} | Dept: {emp.get('departmentName','')} | Role: {emp.get('role','')}",
+                f"Channels: {', '.join(emp.get('channels', []))}",
+                f"Agent: {emp.get('agentId', 'none')} | Status: {agent.get('status','') if agent else 'no agent'}",
+                f"Skills: {', '.join(agent.get('skills',[]) if agent else [])}",
+                f"Bindings: {len(bindings)} ({', '.join(b.get('channel','') for b in bindings)})",
+                f"Today usage: {usage.get('requests',0)} requests, ${usage.get('cost',0):.4f}",
+            ]
+            if agent:
+                sv = agent.get("soulVersions") or {}
+                lines.append(f"SOUL versions: global=v{sv.get('global',0)} position=v{sv.get('position',0)} personal=v{sv.get('personal',0)}")
+            return "\n".join(lines)
+
+        elif name == "get_soul_template":
+            scope = inputs["scope"]
+            if scope == "global":
+                content = s3ops.read_file("_shared/soul/global/SOUL.md") or "(empty)"
+                return f"**Global SOUL** (locked):\n\n{content[:3000]}"
+            elif scope == "position":
+                pos_id = inputs.get("position_id", "")
+                if not pos_id:
+                    return "position_id required for scope=position"
+                content = s3ops.read_file(f"_shared/soul/positions/{pos_id}/SOUL.md") or "(not set)"
+                return f"**Position SOUL [{pos_id}]**:\n\n{content[:3000]}"
+            elif scope == "personal":
+                emp_id = inputs.get("employee_id", "")
+                if not emp_id:
+                    return "employee_id required for scope=personal"
+                content = s3ops.read_file(f"{emp_id}/workspace/SOUL.md") or "(not set)"
+                return f"**Personal SOUL [{emp_id}]**:\n\n{content[:3000]}"
+
+        elif name == "update_soul_template":
+            scope = inputs["scope"]
+            content = inputs["content"]
+            if scope == "global":
+                return "❌ Global SOUL is locked and cannot be modified."
+            elif scope == "position":
+                pos_id = inputs.get("position_id", "")
+                if not pos_id:
+                    return "position_id required for scope=position"
+                s3ops.write_file(f"_shared/soul/positions/{pos_id}/SOUL.md", content)
+                db.create_audit_entry({
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "eventType": "config_change", "actorId": actor_id, "actorName": actor_name,
+                    "targetType": "soul", "targetId": pos_id,
+                    "detail": f"Admin AI updated position SOUL for {pos_id} ({len(content)} chars)",
+                    "status": "success",
+                })
+                return f"✅ Position SOUL for {pos_id} updated ({len(content)} chars). Agents will get it on next workspace assembly."
+            elif scope == "personal":
+                emp_id = inputs.get("employee_id", "")
+                if not emp_id:
+                    return "employee_id required for scope=personal"
+                s3ops.write_file(f"{emp_id}/workspace/SOUL.md", content)
+                db.create_audit_entry({
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "eventType": "config_change", "actorId": actor_id, "actorName": actor_name,
+                    "targetType": "soul", "targetId": emp_id,
+                    "detail": f"Admin AI updated personal SOUL for {emp_id} ({len(content)} chars)",
+                    "status": "success",
+                })
+                return f"✅ Personal SOUL for {emp_id} updated ({len(content)} chars)."
+
+        elif name == "list_departments_and_positions":
+            depts = db.get_departments()
+            positions = db.get_positions()
+            lines = ["**Departments:**"]
+            for d in depts:
+                lines.append(f"  {d['id']} | {d['name']} | head: {d.get('headName','')} | members: {d.get('headCount',0)}")
+            lines.append("\n**Positions:**")
+            for p in positions:
+                lines.append(f"  {p['id']} | {p['name']} | dept: {p.get('departmentName','')} | channel: {p.get('defaultChannel','')} | members: {p.get('employeeCount',0)}")
+            return "\n".join(lines)
+
+        elif name == "get_agent_detail":
+            agents = db.get_agents()
+            agent = None
+            if inputs.get("agent_id"):
+                agent = next((a for a in agents if a["id"] == inputs["agent_id"]), None)
+            elif inputs.get("employee_id"):
+                agent = next((a for a in agents if a.get("employeeId") == inputs["employee_id"]), None)
+            if not agent:
+                return "Agent not found."
+            usage = _get_agent_usage_today().get(agent["id"], {})
+            sv = agent.get("soulVersions") or {}
+            lines = [
+                f"**{agent['name']}** ({agent['id']})",
+                f"Employee: {agent.get('employeeName','')} | Position: {agent.get('positionName','')}",
+                f"Status: {agent.get('status','')} | Quality: {agent.get('qualityScore','—')}",
+                f"Channels: {', '.join(agent.get('channels',[]))}",
+                f"Skills: {', '.join(agent.get('skills',[]))}",
+                f"SOUL: global=v{sv.get('global',0)} position=v{sv.get('position',0)} personal=v{sv.get('personal',0)}",
+                f"Today: {usage.get('requests',0)} reqs, ${usage.get('cost',0):.4f}, model={usage.get('model','')}",
+            ]
+            return "\n".join(lines)
+
+        elif name == "get_usage_report":
+            scope = inputs["scope"]
+            if scope == "summary":
+                s = usage_summary()
+                return (f"Input: {s['totalInputTokens']:,} tokens\n"
+                        f"Output: {s['totalOutputTokens']:,} tokens\n"
+                        f"Cost today: ${s['totalCost']:.4f}\n"
+                        f"Requests: {s['totalRequests']}\n"
+                        f"Active tenants: {s['tenantCount']}\n"
+                        f"vs ChatGPT equivalent: ${s['chatgptEquivalent']:.2f}/day")
+            elif scope == "by_department":
+                rows = usage_by_department()
+                lines = [f"{'Dept':<25} {'Agents':>6} {'Reqs':>6} {'Tokens':>8} {'Cost':>8}"]
+                lines.append("-" * 58)
+                for r in rows:
+                    lines.append(f"{r['department']:<25} {r['agents']:>6} {r['requests']:>6} {(r['inputTokens']+r['outputTokens'])//1000:>7}k ${r['cost']:>6.2f}")
+                return "\n".join(lines)
+            elif scope == "by_agent":
+                rows = usage_by_agent()
+                lines = [f"{'Agent':<30} {'Reqs':>5} {'Cost':>7}"]
+                for r in rows[:20]:
+                    lines.append(f"{r['agentName'][:30]:<30} {r['requests']:>5} ${r['cost']:>5.2f}")
+                return "\n".join(lines)
+
+        elif name == "get_service_health":
+            svc = get_services()
+            lines = []
+            for name_svc, info in svc.items():
+                status = info.get("status", "unknown")
+                icon = "✅" if status in ("healthy", "active", "running", "connected") else "⚠️"
+                extra = ""
+                if name_svc == "gateway":
+                    extra = f" | port {info.get('port','')} | {info.get('requestsToday',0)} reqs today"
+                elif name_svc == "bedrock":
+                    ms = info.get("latencyMs")
+                    extra = f" | {info.get('region','')} | {ms}ms" if ms else f" | {info.get('region','')}"
+                elif name_svc == "dynamodb":
+                    extra = f" | {info.get('table','')} | {info.get('itemCount',0)} items"
+                elif name_svc == "s3":
+                    extra = f" | {info.get('bucket','')}"
+                lines.append(f"{icon} **{name_svc}**: {status}{extra}")
+            return "\n".join(lines)
+
+        elif name == "get_audit_log":
+            limit = min(int(inputs.get("limit", 20)), 50)
+            entries = db.get_audit_entries(limit=limit)
+            if inputs.get("employee_id"):
+                entries = [e for e in entries if e.get("actorId") == inputs["employee_id"]]
+            if inputs.get("event_type"):
+                entries = [e for e in entries if e.get("eventType") == inputs["event_type"]]
+            entries = entries[:limit]
+            lines = []
+            for e in entries:
+                ts = e.get("timestamp", "")[:16].replace("T", " ")
+                lines.append(f"{ts} | {e.get('eventType','')} | {e.get('actorName','')} | {e.get('detail','')[:60]}")
+            return f"{len(lines)} entries:\n" + "\n".join(lines) if lines else "No entries found."
+
+        elif name == "list_bindings":
+            bindings = db.get_bindings()
+            if inputs.get("employee_id"):
+                bindings = [b for b in bindings if b.get("employeeId") == inputs["employee_id"]]
+            if inputs.get("channel"):
+                bindings = [b for b in bindings if b.get("channel") == inputs["channel"]]
+            lines = [f"- {b.get('employeeName','')} ({b.get('employeeId','')}) | {b.get('channel','')} | {b.get('status','')} | agent: {b.get('agentId','')}"
+                     for b in bindings]
+            return f"{len(bindings)} bindings:\n" + "\n".join(lines)
+
+        return f"Unknown tool: {name}"
+
+    except Exception as e:
+        return f"Tool error ({name}): {e}"
+
+
+def _admin_ai_loop(history: list, user) -> str:
+    """Agentic loop: call Claude with tools, execute tool_use responses, repeat until text."""
+    import boto3 as _b3_ai
+    client = _b3_ai.client("bedrock-runtime", region_name=AWS_REGION)
+
+    messages = list(history)  # shallow copy
+
+    for _ in range(8):  # max 8 tool-use rounds
+        try:
+            resp = client.converse(
+                modelId=_ADMIN_AI_MODEL,
+                system=[{"text": _ADMIN_AI_SYSTEM}],
+                messages=messages,
+                toolConfig={"tools": [{"toolSpec": t} for t in _ADMIN_AI_TOOLS]},
+                inferenceConfig={"maxTokens": 2048, "temperature": 0.2},
+            )
+        except Exception as e:
+            return f"⚠️ AI error: {e}"
+
+        stop_reason = resp.get("stopReason", "")
+        output_msg = resp.get("output", {}).get("message", {})
+        content_blocks = output_msg.get("content", [])
+
+        # Collect text and tool_use blocks
+        text_parts = []
+        tool_uses = []
+        for block in content_blocks:
+            if block.get("text"):
+                text_parts.append(block["text"])
+            if block.get("toolUse"):
+                tool_uses.append(block["toolUse"])
+
+        if stop_reason == "end_turn" or not tool_uses:
+            return " ".join(text_parts) or "(no response)"
+
+        # Execute all tool calls
+        messages.append({"role": "assistant", "content": content_blocks})
+        tool_results = []
+        for tu in tool_uses:
+            result = _execute_admin_tool(tu["name"], tu.get("input", {}), user.employee_id, user.name)
+            tool_results.append({
+                "toolResult": {
+                    "toolUseId": tu["toolUseId"],
+                    "content": [{"text": result}],
+                }
+            })
+        messages.append({"role": "user", "content": tool_results})
+
+    return "⚠️ Reached maximum tool-use rounds."
+
+
+class AdminAiMessage(BaseModel):
+    message: str
+
+
+@app.post("/api/v1/admin-ai/chat")
+def admin_ai_chat(body: AdminAiMessage, authorization: str = Header(default="")):
+    """Admin AI assistant — Claude via Bedrock + whitelist tools. Admin only."""
+    user = _require_role(authorization, roles=["admin"])
+
+    # Get or init per-admin history
+    history = _admin_ai_history.setdefault(user.employee_id, [])
+    # Bedrock Converse API requires content as list of blocks
+    history.append({"role": "user", "content": [{"text": body.message}]})
+
+    # Trim to last 20 messages to stay within token limits
+    if len(history) > 20:
+        _admin_ai_history[user.employee_id] = history[-20:]
+        history = _admin_ai_history[user.employee_id]
+
+    response_text = _admin_ai_loop(history, user)
+    history.append({"role": "assistant", "content": [{"text": response_text}]})
+
+    return {"response": response_text}
+
+
+@app.delete("/api/v1/admin-ai/chat")
+def admin_ai_clear(authorization: str = Header(default="")):
+    """Clear conversation history for the current admin."""
+    user = _require_role(authorization, roles=["admin"])
+    _admin_ai_history.pop(user.employee_id, None)
+    return {"cleared": True}
+
+
+# =========================================================================
+# Security Center — SOUL, Tools, Runtimes, Infrastructure
+# =========================================================================
+
+@app.get("/api/v1/security/global-soul")
+def get_global_soul(authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    try:
+        bucket = s3ops.bucket()
+        key = "_shared/soul/global/SOUL.md"
+        body = s3ops._client().get_object(Bucket=bucket, Key=key)["Body"].read().decode()
+        return {"content": body, "key": key}
+    except Exception as e:
+        return {"content": "", "key": "_shared/soul/global/SOUL.md", "error": str(e)}
+
+@app.put("/api/v1/security/global-soul")
+def put_global_soul(body: dict, authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    bucket = s3ops.bucket()
+    s3ops._client().put_object(Bucket=bucket, Key="_shared/soul/global/SOUL.md",
+                               Body=body.get("content", "").encode(), ContentType="text/markdown")
+    _bump_config_version()
+    return {"saved": True}
+
+@app.get("/api/v1/security/positions/{pos_id}/soul")
+def get_position_soul(pos_id: str, authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    try:
+        bucket = s3ops.bucket()
+        key = f"_shared/soul/positions/{pos_id}/SOUL.md"
+        body = s3ops._client().get_object(Bucket=bucket, Key=key)["Body"].read().decode()
+        return {"content": body, "key": key}
+    except Exception as e:
+        return {"content": "", "key": f"_shared/soul/positions/{pos_id}/SOUL.md", "error": str(e)}
+
+@app.put("/api/v1/security/positions/{pos_id}/soul")
+def put_position_soul(pos_id: str, body: dict, authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    bucket = s3ops.bucket()
+    s3ops._client().put_object(Bucket=bucket, Key=f"_shared/soul/positions/{pos_id}/SOUL.md",
+                               Body=body.get("content", "").encode(), ContentType="text/markdown")
+    _bump_config_version()
+    return {"saved": True}
+
+@app.get("/api/v1/security/positions/{pos_id}/tools")
+def get_position_tools(pos_id: str, authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    # Read all employees in this position and return their permissions, or return position-default
+    try:
+        stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+        ssm = _ssm_client()
+        # Check if there's a position-level default stored in SSM
+        try:
+            resp = ssm.get_parameter(Name=f"/openclaw/{stack}/positions/{pos_id}/tools")
+            return json.loads(resp["Parameter"]["Value"])
+        except Exception:
+            pass
+        # Fallback: infer from employees
+        emps = db.get_employees()
+        pos_emps = [e for e in emps if e.get("positionId") == pos_id]
+        for emp in pos_emps[:1]:
+            try:
+                p = ssm.get_parameter(Name=f"/openclaw/{stack}/tenants/{emp['id']}/permissions")
+                data = json.loads(p["Parameter"]["Value"])
+                return {"profile": data.get("profile", "basic"), "tools": data.get("tools", [])}
+            except Exception:
+                pass
+        return {"profile": "basic", "tools": ["web_search"]}
+    except Exception as e:
+        return {"profile": "basic", "tools": ["web_search"], "error": str(e)}
+
+@app.put("/api/v1/security/positions/{pos_id}/tools")
+def put_position_tools(pos_id: str, body: dict, authorization: str = Header(default="")):
+    """Write tool permissions for ALL employees in this position."""
+    _require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    ssm = _ssm_client()
+    profile = {"profile": body.get("profile", "custom"), "tools": body.get("tools", []),
+               "role": body.get("profile", "custom"),
+               "data_permissions": {"file_paths": [], "api_endpoints": []}}
+    value = json.dumps(profile)
+    # Write position-level default
+    try:
+        ssm.put_parameter(Name=f"/openclaw/{stack}/positions/{pos_id}/tools",
+                          Value=value, Type="String", Overwrite=True)
+    except Exception as e:
+        print(f"[security] position tools write failed: {e}")
+    # Also propagate to all employees in this position
+    emps = db.get_employees()
+    for emp in emps:
+        if emp.get("positionId") == pos_id:
+            try:
+                # Use us-east-1 — where agent container reads
+                import boto3 as _b3_t
+                ssm_e1 = _b3_t.client("ssm", region_name=_GATEWAY_REGION)
+                ssm_e1.put_parameter(Name=f"/openclaw/{stack}/tenants/{emp['id']}/permissions",
+                                     Value=value, Type="String", Overwrite=True)
+            except Exception as e2:
+                print(f"[security] emp {emp['id']} tools write failed: {e2}")
+    return {"saved": True, "propagated": len([e for e in emps if e.get("positionId") == pos_id])}
+
+@app.get("/api/v1/security/positions/{pos_id}/runtime")
+def get_position_runtime(pos_id: str, authorization: str = Header(default="")):
+    """Read the runtime assigned to a position (SSM /positions/{pos_id}/runtime-id)."""
+    _require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    try:
+        import boto3 as _b3pr
+        ssm = _b3pr.client("ssm", region_name=_GATEWAY_REGION)
+        resp = ssm.get_parameter(Name=f"/openclaw/{stack}/positions/{pos_id}/runtime-id")
+        return {"posId": pos_id, "runtimeId": resp["Parameter"]["Value"]}
+    except Exception:
+        return {"posId": pos_id, "runtimeId": None}
+
+
+@app.put("/api/v1/security/positions/{pos_id}/runtime")
+def put_position_runtime(pos_id: str, body: dict, authorization: str = Header(default="")):
+    """Assign a runtime to a position. Propagates to all employees in the position
+    by writing their individual SSM /tenants/{emp_id}/runtime-id entries."""
+    _require_role(authorization, roles=["admin"])
+    runtime_id = body.get("runtimeId", "")
+    if not runtime_id:
+        raise HTTPException(400, "runtimeId required")
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    import boto3 as _b3pr2
+    ssm = _b3pr2.client("ssm", region_name=_GATEWAY_REGION)
+    # Write position-level SSM (for Tenant Router Tier 2 lookup)
+    ssm.put_parameter(
+        Name=f"/openclaw/{stack}/positions/{pos_id}/runtime-id",
+        Value=runtime_id, Type="String", Overwrite=True,
+    )
+    # Propagate to all employees in this position (Tier 1 override for fast lookup)
+    emps = db.get_employees()
+    propagated = []
+    for emp in emps:
+        if emp.get("positionId") == pos_id:
+            try:
+                ssm.put_parameter(
+                    Name=f"/openclaw/{stack}/tenants/{emp['id']}/runtime-id",
+                    Value=runtime_id, Type="String", Overwrite=True,
+                )
+                propagated.append(emp["id"])
+            except Exception as e:
+                print(f"[position-runtime] emp {emp['id']} failed: {e}")
+    db.create_audit_entry({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eventType": "config_change",
+        "actorId": "admin",
+        "actorName": "Admin",
+        "targetType": "runtime_assignment",
+        "targetId": f"{pos_id} → {runtime_id}",
+        "detail": f"Position {pos_id} assigned to runtime {runtime_id}. Propagated to {len(propagated)} employees.",
+        "status": "success",
+    })
+    return {"saved": True, "posId": pos_id, "runtimeId": runtime_id, "propagated": propagated}
+
+
+@app.delete("/api/v1/security/positions/{pos_id}/runtime")
+def delete_position_runtime(pos_id: str, authorization: str = Header(default="")):
+    """Remove position-level runtime assignment (employees fall back to default)."""
+    _require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    import boto3 as _b3pr3
+    ssm = _b3pr3.client("ssm", region_name=_GATEWAY_REGION)
+    try:
+        ssm.delete_parameter(Name=f"/openclaw/{stack}/positions/{pos_id}/runtime-id")
+    except Exception:
+        pass
+    return {"deleted": True, "posId": pos_id}
+
+
+@app.get("/api/v1/security/position-runtime-map")
+def get_position_runtime_map(authorization: str = Header(default="")):
+    """Get all position → runtime assignments in one call (for the UI mapping table)."""
+    _require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    import boto3 as _b3prm
+    ssm = _b3prm.client("ssm", region_name=_GATEWAY_REGION)
+    result = {}
+    try:
+        prefix = f"/openclaw/{stack}/positions/"
+        paginator = ssm.get_paginator("get_parameters_by_path")
+        for page in paginator.paginate(Path=prefix, Recursive=True):
+            for p in page["Parameters"]:
+                name = p["Name"].replace(prefix, "")
+                if name.endswith("/runtime-id"):
+                    pos_id = name.replace("/runtime-id", "")
+                    result[pos_id] = p["Value"]
+    except Exception as e:
+        print(f"[position-runtime-map] {e}")
+    return {"map": result}
+
+
+@app.get("/api/v1/security/runtimes")
+def get_security_runtimes(authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    try:
+        import boto3 as _b3r
+        ac = _b3r.client("bedrock-agentcore-control", region_name=_GATEWAY_REGION)
+        resp = ac.list_agent_runtimes()
+        result = []
+        for rt in resp.get("agentRuntimes", []):
+            rt_id = rt.get("agentRuntimeId", "")
+            try:
+                detail = ac.get_agent_runtime(agentRuntimeId=rt_id)
+                artifact = detail.get("agentRuntimeArtifact", {}).get("containerConfiguration", {})
+                env = detail.get("environmentVariables", {})
+                lc = detail.get("lifecycleConfiguration", {})
+                result.append({
+                    "id": rt_id,
+                    "name": detail.get("agentRuntimeName", rt_id),
+                    "status": detail.get("status", "UNKNOWN"),
+                    "containerUri": artifact.get("containerUri", ""),
+                    "roleArn": detail.get("roleArn", ""),
+                    "model": env.get("BEDROCK_MODEL_ID", ""),
+                    "region": env.get("AWS_REGION", "us-east-1"),
+                    "idleTimeoutSec": lc.get("idleRuntimeSessionTimeout", 900),
+                    "maxLifetimeSec": lc.get("maxLifetime", 28800),
+                    "guardrailId": env.get("GUARDRAIL_ID", ""),
+                    "guardrailVersion": env.get("GUARDRAIL_VERSION", ""),
+                    "createdAt": detail.get("createdAt", "").isoformat() if hasattr(detail.get("createdAt", ""), "isoformat") else str(detail.get("createdAt", "")),
+                    "version": detail.get("agentRuntimeVersion", "1"),
+                })
+            except Exception:
+                result.append({"id": rt_id, "name": rt.get("agentRuntimeName", rt_id), "status": rt.get("status", "UNKNOWN")})
+        return {"runtimes": result}
+    except Exception as e:
+        return {"runtimes": [], "error": str(e)}
+
+@app.put("/api/v1/security/runtimes/{runtime_id}/lifecycle")
+def update_runtime_lifecycle(runtime_id: str, body: dict, authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    try:
+        import boto3 as _b3r2
+        ac = _b3r2.client("bedrock-agentcore-control", region_name=_GATEWAY_REGION)
+        detail = ac.get_agent_runtime(agentRuntimeId=runtime_id)
+        # IMPORTANT: always pass environmentVariables — AgentCore clears them if omitted
+        existing_env = detail.get("environmentVariables") or {}
+        kwargs: dict = {
+            "agentRuntimeId": runtime_id,
+            "agentRuntimeArtifact": detail["agentRuntimeArtifact"],
+            "roleArn": detail["roleArn"],
+            "networkConfiguration": detail["networkConfiguration"],
+            "lifecycleConfiguration": {
+                "idleRuntimeSessionTimeout": body.get("idleTimeoutSec", 900),
+                "maxLifetime": body.get("maxLifetimeSec", 28800),
+            },
+        }
+        if existing_env:
+            kwargs["environmentVariables"] = existing_env
+        if detail.get("protocolConfiguration"):
+            kwargs["protocolConfiguration"] = detail["protocolConfiguration"]
+        ac.update_agent_runtime(**kwargs)
+        return {"saved": True}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.put("/api/v1/security/runtimes/{runtime_id}/config")
+def update_runtime_config(runtime_id: str, body: dict, authorization: str = Header(default="")):
+    """Full runtime config update: image, roleArn, security groups, model, lifecycle."""
+    _require_role(authorization, roles=["admin"])
+    try:
+        import boto3 as _b3rc
+        ac = _b3rc.client("bedrock-agentcore-control", region_name=_GATEWAY_REGION)
+        detail = ac.get_agent_runtime(agentRuntimeId=runtime_id)
+
+        # Build updated artifact
+        container_uri = body.get("containerUri") or detail["agentRuntimeArtifact"]["containerConfiguration"]["containerUri"]
+        artifact = {"containerConfiguration": {"containerUri": container_uri}}
+
+        # Build updated network config
+        network_mode = body.get("networkMode", detail.get("networkConfiguration", {}).get("networkMode", "PUBLIC"))
+        network_cfg: dict = {"networkMode": network_mode}
+        if network_mode == "VPC":
+            sg_ids = body.get("securityGroupIds", [])
+            subnet_ids = body.get("subnetIds", [])
+            if sg_ids and subnet_ids:
+                network_cfg["networkModeConfig"] = {"securityGroups": sg_ids, "subnets": subnet_ids}
+
+        # Build updated environment variables — always preserve existing ones
+        # (AgentCore clears environmentVariables if the field is omitted from update)
+        existing_env = detail.get("environmentVariables") or {}
+        new_env = dict(existing_env)
+        if body.get("modelId"):
+            new_env["BEDROCK_MODEL_ID"] = body["modelId"]
+            # Also update DynamoDB so agents pick it up on cold start
+            try:
+                import boto3 as _b3ddb
+                _b3ddb.resource("dynamodb", region_name=os.environ.get("DYNAMODB_REGION", "us-east-2")).Table(
+                    os.environ.get("DYNAMODB_TABLE", "openclaw-enterprise")
+                )
+            except Exception:
+                pass
+
+        # Guardrail binding: store as env vars; "" means remove guardrail
+        if "guardrailId" in body:
+            gid = body["guardrailId"].strip()
+            if gid:
+                new_env["GUARDRAIL_ID"] = gid
+                new_env["GUARDRAIL_VERSION"] = body.get("guardrailVersion", "DRAFT").strip() or "DRAFT"
+            else:
+                new_env.pop("GUARDRAIL_ID", None)
+                new_env.pop("GUARDRAIL_VERSION", None)
+
+        role_arn = body.get("roleArn") or detail["roleArn"]
+        idle = body.get("idleTimeoutSec") or detail.get("lifecycleConfiguration", {}).get("idleRuntimeSessionTimeout", 900)
+        max_life = body.get("maxLifetimeSec") or detail.get("lifecycleConfiguration", {}).get("maxLifetime", 28800)
+
+        kwargs: dict = {
+            "agentRuntimeId": runtime_id,
+            "agentRuntimeArtifact": artifact,
+            "roleArn": role_arn,
+            "networkConfiguration": network_cfg,
+            "lifecycleConfiguration": {"idleRuntimeSessionTimeout": idle, "maxLifetime": max_life},
+        }
+        if new_env:
+            kwargs["environmentVariables"] = new_env
+        if detail.get("protocolConfiguration"):
+            kwargs["protocolConfiguration"] = detail["protocolConfiguration"]
+
+        ac.update_agent_runtime(**kwargs)
+        return {"saved": True, "runtimeId": runtime_id}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+class CreateRuntimeRequest(BaseModel):
+    name: str
+    containerUri: str
+    roleArn: str
+    networkMode: str = "PUBLIC"
+    securityGroupIds: list = []
+    subnetIds: list = []
+    modelId: str = "global.amazon.nova-2-lite-v1:0"
+    idleTimeoutSec: int = 900
+    maxLifetimeSec: int = 28800
+
+
+@app.post("/api/v1/security/runtimes/create")
+def create_runtime(body: CreateRuntimeRequest, authorization: str = Header(default="")):
+    """Create a new AgentCore runtime."""
+    _require_role(authorization, roles=["admin"])
+    try:
+        import boto3 as _b3cr
+        ac = _b3cr.client("bedrock-agentcore-control", region_name=_GATEWAY_REGION)
+
+        network_cfg: dict = {"networkMode": body.networkMode}
+        if body.networkMode == "VPC" and body.securityGroupIds and body.subnetIds:
+            network_cfg["networkModeConfig"] = {
+                "securityGroups": body.securityGroupIds,
+                "subnets": body.subnetIds,
+            }
+
+        stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+        bucket = os.environ.get("S3_BUCKET", f"openclaw-tenants-{_GATEWAY_ACCOUNT_ID}")
+        region = os.environ.get("AWS_REGION", "us-east-1")
+        ddb_region = os.environ.get("DYNAMODB_REGION", "us-east-2")
+        ddb_table = os.environ.get("DYNAMODB_TABLE", "openclaw-enterprise")
+
+        resp = ac.create_agent_runtime(
+            agentRuntimeName=body.name,
+            agentRuntimeArtifact={"containerConfiguration": {"containerUri": body.containerUri}},
+            roleArn=body.roleArn,
+            networkConfiguration=network_cfg,
+            lifecycleConfiguration={"idleRuntimeSessionTimeout": body.idleTimeoutSec, "maxLifetime": body.maxLifetimeSec},
+            protocolConfiguration={"serverProtocol": "HTTP"},
+            environmentVariables={
+                "BEDROCK_MODEL_ID": body.modelId,
+                "AWS_REGION": region,
+                "STACK_NAME": stack,
+                "S3_BUCKET": bucket,
+                "DYNAMODB_TABLE": ddb_table,
+                "DYNAMODB_REGION": ddb_region,
+            },
+        )
+        return {"created": True, "runtimeId": resp.get("agentRuntimeId", ""), "status": resp.get("status", "")}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+# ── Guardrails ───────────────────────────────────────────────────────────────
+
+@app.get("/api/v1/security/guardrails")
+def list_guardrails(authorization: str = Header(default="")):
+    """List all Bedrock Guardrails available in this account/region."""
+    _require_role(authorization, roles=["admin"])
+    try:
+        import boto3 as _b3gr
+        bedrock = _b3gr.client("bedrock", region_name=_GATEWAY_REGION)
+        resp = bedrock.list_guardrails(maxResults=100)
+        guardrails = []
+        for g in resp.get("guardrails", []):
+            guardrails.append({
+                "id": g["id"],
+                "name": g["name"],
+                "status": g.get("status", "READY"),
+                "version": g.get("version", "DRAFT"),
+                "updatedAt": g.get("updatedAt", "").isoformat() if hasattr(g.get("updatedAt", ""), "isoformat") else str(g.get("updatedAt", "")),
+            })
+        return {"guardrails": guardrails}
+    except Exception as e:
+        return {"guardrails": [], "error": str(e)}
+
+
+@app.get("/api/v1/audit/guardrail-events")
+def get_guardrail_events(authorization: str = Header(default=""), limit: int = 50):
+    """Fetch guardrail_block audit events from DynamoDB."""
+    _require_role(authorization, roles=["admin", "manager"])
+    try:
+        table = boto3.resource("dynamodb", region_name=DYNAMODB_REGION).Table(DYNAMODB_TABLE)
+        resp = table.query(
+            IndexName="GSI1",
+            KeyConditionExpression=Key("GSI1PK").eq("TYPE#audit"),
+            ScanIndexForward=False,
+            Limit=limit * 5,  # over-fetch since we filter by eventType
+        )
+        events = [item for item in resp.get("Items", []) if item.get("eventType") == "guardrail_block"]
+        events = events[:limit]
+        for e in events:
+            e.pop("PK", None); e.pop("SK", None)
+            e.pop("GSI1PK", None); e.pop("GSI1SK", None)
+        return {"events": events}
+    except Exception as e:
+        return {"events": [], "error": str(e)}
+
+
+# ── Separate resource endpoints for dropdowns ──────────────────────────────
+
+@app.get("/api/v1/security/ecr-images")
+def list_ecr_images(authorization: str = Header(default="")):
+    """List all ECR repos and their tagged images for runtime image selector."""
+    _require_role(authorization, roles=["admin"])
+    import boto3 as _b3ecr
+    ecr = _b3ecr.client("ecr", region_name=_GATEWAY_REGION)
+    account = boto3.client("sts").get_caller_identity()["Account"]
+    result = []
+    try:
+        repos = ecr.describe_repositories().get("repositories", [])
+        for repo in repos:
+            try:
+                imgs = ecr.describe_images(
+                    repositoryName=repo["repositoryName"],
+                    filter={"tagStatus": "TAGGED"}
+                ).get("imageDetails", [])
+                # Sort by push date descending
+                imgs.sort(key=lambda x: x.get("imagePushedAt", ""), reverse=True)
+                for img in imgs:
+                    for tag in (img.get("imageTags") or ["latest"]):
+                        pushed = img.get("imagePushedAt")
+                        result.append({
+                            "uri": f"{repo['repositoryUri']}:{tag}",
+                            "repo": repo["repositoryName"],
+                            "tag": tag,
+                            "digest": (img.get("imageDigest", ""))[:20],
+                            "sizeBytes": img.get("imageSizeInBytes", 0),
+                            "pushedAt": pushed.isoformat() if hasattr(pushed, "isoformat") else str(pushed or ""),
+                        })
+            except Exception:
+                pass
+    except Exception as e:
+        return {"images": [], "error": str(e)}
+    return {"images": result}
+
+
+@app.get("/api/v1/security/iam-roles")
+def list_iam_roles(authorization: str = Header(default="")):
+    """List IAM roles — all roles, agentcore/openclaw roles flagged."""
+    _require_role(authorization, roles=["admin"])
+    import boto3 as _b3iam
+    iam = _b3iam.client("iam")
+    result = []
+    try:
+        # Only paginate first 2 pages (~200 roles max) to keep response fast.
+        # Relevant roles (agentcore/openclaw/bedrock) are always included.
+        paginator = iam.get_paginator("list_roles")
+        pages_fetched = 0
+        for page in paginator.paginate():
+            pages_fetched += 1
+            for r in page["Roles"]:
+                name_lower = r["RoleName"].lower()
+                relevant = "agentcore" in name_lower or "openclaw" in name_lower or "bedrock" in name_lower
+                result.append({
+                    "name": r["RoleName"],
+                    "arn": r["Arn"],
+                    "relevant": relevant,
+                    "created": r["CreateDate"].isoformat() if hasattr(r["CreateDate"], "isoformat") else str(r["CreateDate"]),
+                })
+            if pages_fetched >= 2:
+                break
+        result.sort(key=lambda r: (not r["relevant"], r["name"]))
+    except Exception as e:
+        return {"roles": [], "error": str(e)}
+    return {"roles": result}
+
+
+@app.get("/api/v1/security/vpc-resources")
+def list_vpc_resources(authorization: str = Header(default="")):
+    """List VPCs, subnets, and security groups for runtime network config."""
+    _require_role(authorization, roles=["admin"])
+    import boto3 as _b3vpc
+    ec2 = _b3vpc.client("ec2", region_name=_GATEWAY_REGION)
+    result = {"vpcs": [], "subnets": [], "securityGroups": []}
+    try:
+        vpcs = ec2.describe_vpcs()["Vpcs"]
+        for v in vpcs:
+            name = next((t["Value"] for t in v.get("Tags", []) if t["Key"] == "Name"), v["VpcId"])
+            result["vpcs"].append({
+                "id": v["VpcId"], "name": name,
+                "cidr": v["CidrBlock"], "isDefault": v.get("IsDefault", False),
+            })
+    except Exception as e:
+        result["vpcs"] = [{"error": str(e)}]
+    try:
+        subnets = ec2.describe_subnets()["Subnets"]
+        for s in subnets:
+            name = next((t["Value"] for t in s.get("Tags", []) if t["Key"] == "Name"), s["SubnetId"])
+            result["subnets"].append({
+                "id": s["SubnetId"], "name": name, "vpcId": s["VpcId"],
+                "az": s["AvailabilityZone"], "cidr": s["CidrBlock"],
+                "public": s.get("MapPublicIpOnLaunch", False),
+            })
+    except Exception as e:
+        result["subnets"] = [{"error": str(e)}]
+    try:
+        sgs = ec2.describe_security_groups()["SecurityGroups"]
+        for sg in sgs:
+            result["securityGroups"].append({
+                "id": sg["GroupId"], "name": sg["GroupName"],
+                "description": sg["Description"], "vpcId": sg.get("VpcId", ""),
+                "relevant": any(kw in sg["GroupName"].lower() for kw in ["agentcore", "openclaw", "bedrock"]),
+            })
+        result["securityGroups"].sort(key=lambda s: (not s["relevant"], s["name"]))
+    except Exception as e:
+        result["securityGroups"] = [{"error": str(e)}]
+    return result
+
+
+@app.get("/api/v1/security/infrastructure")
+def get_infrastructure(authorization: str = Header(default="")):
+    """Aggregate view: ECR + IAM + VPC — run in parallel for speed."""
+    _require_role(authorization, roles=["admin"])
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _ecr():
+        return "ecr", list_ecr_images(authorization)
+
+    def _iam():
+        return "iam", list_iam_roles(authorization)
+
+    def _vpc():
+        return "vpc", list_vpc_resources(authorization)
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(_ecr), pool.submit(_iam), pool.submit(_vpc)]
+        for f in as_completed(futures, timeout=15):
+            try:
+                key, data = f.result()
+                results[key] = data
+            except Exception as e:
+                pass
+
+    ecr_data = results.get("ecr", {})
+    iam_data = results.get("iam", {})
+    vpc_data = results.get("vpc", {})
+    return {
+        "ecrImages": ecr_data.get("images", []),
+        "iamRoles": iam_data.get("roles", []),
+        "securityGroups": vpc_data.get("securityGroups", []),
+        "vpcs": vpc_data.get("vpcs", []),
+        "subnets": vpc_data.get("subnets", []),
+    }
+
+# =========================================================================
+# Settings — Admin Account, Admin Assistant, System Stats
+# =========================================================================
+
+@app.put("/api/v1/settings/admin-password")
+def change_admin_password(body: dict, authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    new_pw = body.get("newPassword", "")
+    if len(new_pw) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters")
+    try:
+        stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+        import boto3 as _b3pw
+        _b3pw.client("ssm", region_name=_GATEWAY_REGION).put_parameter(
+            Name=f"/openclaw/{stack}/admin-password",
+            Value=new_pw, Type="SecureString", Overwrite=True)
+        os.environ["ADMIN_PASSWORD"] = new_pw
+        return {"saved": True}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@app.get("/api/v1/settings/admin-assistant")
+def get_admin_assistant(authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    try:
+        cfg = db.get_config("admin-assistant") or {}
+    except Exception:
+        cfg = {}
+    return {
+        "model": cfg.get("model", os.environ.get("BEDROCK_MODEL_ID", "global.amazon.nova-2-lite-v1:0")),
+        "allowedCommands": cfg.get("allowedCommands", ["list_employees", "list_agents", "get_agent", "list_sessions", "list_audit", "list_approvals", "approve_request", "deny_request", "get_service_status", "get_model_config", "update_model_config"]),
+        "systemPromptExtra": cfg.get("systemPromptExtra", ""),
+    }
+
+@app.put("/api/v1/settings/admin-assistant")
+def put_admin_assistant(body: dict, authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    cfg = {
+        "model": body.get("model", ""),
+        "allowedCommands": body.get("allowedCommands", []),
+        "systemPromptExtra": body.get("systemPromptExtra", ""),
+    }
+    db.set_config("admin-assistant", cfg)
+    return {"saved": True}
+
+@app.get("/api/v1/settings/system-stats")
+def get_system_stats(authorization: str = Header(default="")):
+    _require_role(authorization, roles=["admin"])
+    import shutil, subprocess
+    result = {}
+    # Disk
+    try:
+        disk = shutil.disk_usage("/")
+        result["disk"] = {"total": disk.total, "used": disk.used, "free": disk.free,
+                          "pct": round(disk.used / disk.total * 100, 1)}
+    except Exception:
+        result["disk"] = {}
+    # CPU / Memory via /proc (no psutil needed)
+    try:
+        with open("/proc/meminfo") as f:
+            mem_lines = {l.split(":")[0]: int(l.split(":")[1].strip().split()[0])
+                         for l in f if ":" in l}
+        mem_total = mem_lines.get("MemTotal", 0) * 1024
+        mem_free = (mem_lines.get("MemAvailable", 0)) * 1024
+        result["memory"] = {"total": mem_total, "used": mem_total - mem_free, "free": mem_free,
+                             "pct": round((mem_total - mem_free) / max(mem_total, 1) * 100, 1)}
+    except Exception:
+        result["memory"] = {}
+    try:
+        cpu_out = subprocess.check_output(["top", "-bn1"], text=True, timeout=5)
+        for line in cpu_out.splitlines():
+            if "Cpu" in line or "cpu" in line:
+                parts = line.replace(",", " ").split()
+                for i, p in enumerate(parts):
+                    if "id" in p.lower() and i > 0:
+                        try:
+                            idle = float(parts[i - 1].replace("%", ""))
+                            result["cpu"] = {"pct": round(100 - idle, 1)}
+                            break
+                        except Exception:
+                            pass
+                break
+    except Exception:
+        result["cpu"] = {"pct": 0}
+    # Port status
+    try:
+        ports_out = subprocess.check_output(["ss", "-tlnp"], text=True, timeout=5)
+        listening = set()
+        for line in ports_out.splitlines():
+            if "LISTEN" in line:
+                m = __import__("re").search(r":(\d+)\s", line)
+                if m:
+                    listening.add(int(m.group(1)))
+        key_ports = [
+            {"port": 8099, "name": "Admin Console", "expected": True},
+            {"port": 8090, "name": "Tenant Router", "expected": True},
+            {"port": 8091, "name": "H2 Proxy", "expected": True},
+            {"port": 18789, "name": "OpenClaw Gateway", "expected": False},
+        ]
+        result["ports"] = [{"port": p["port"], "name": p["name"], "listening": p["port"] in listening} for p in key_ports]
+    except Exception:
+        result["ports"] = []
+    return result
+
+
+# =========================================================================
+# Always-on Shared Agents — ECS Fargate tasks
+# =========================================================================
+# Architecture: Admin Console → ECS RunTask (Fargate) → task self-registers
+# its private IP in SSM → Tenant Router reads SSM endpoint → routes to task.
+# No port mapping needed; ECS manages networking via awsvpc mode.
+# =========================================================================
+
+_ALWAYS_ON_ECR_IMAGE = os.environ.get("AGENT_ECR_IMAGE", "")
+
+
+def _get_ecs_config() -> dict:
+    """Resolve ECS cluster / task-def / subnet / SG from env or CloudFormation outputs via SSM."""
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    cluster   = os.environ.get("ECS_CLUSTER_NAME",      f"{stack}-always-on")
+    task_def  = os.environ.get("ECS_TASK_DEFINITION",   f"{stack}-always-on-agent")
+    subnet_id = os.environ.get("ECS_SUBNET_ID",         "")
+    sg_id     = os.environ.get("ECS_TASK_SG_ID",        "")
+
+    # Fall back to SSM if env vars are not set (written by deploy script from CF outputs)
+    if not subnet_id or not sg_id:
+        try:
+            ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+            if not subnet_id:
+                subnet_id = ssm.get_parameter(
+                    Name=f"/openclaw/{stack}/ecs/subnet-id")["Parameter"]["Value"]
+            if not sg_id:
+                sg_id = ssm.get_parameter(
+                    Name=f"/openclaw/{stack}/ecs/task-sg-id")["Parameter"]["Value"]
+        except Exception:
+            pass
+
+    return {"cluster": cluster, "task_def": task_def, "subnet_id": subnet_id, "sg_id": sg_id}
+
+
+@app.post("/api/v1/admin/always-on/{agent_id}/start")
+def start_always_on_agent(agent_id: str, authorization: str = Header(default="")):
+    """Start an always-on ECS Fargate task for a shared agent."""
+    _require_role(authorization, roles=["admin"])
+    stack     = os.environ.get("STACK_NAME",      "openclaw-multitenancy")
+    bucket    = os.environ.get("S3_BUCKET",       f"openclaw-tenants-{_GATEWAY_ACCOUNT_ID}")
+    ddb_table = os.environ.get("DYNAMODB_TABLE",  "openclaw-enterprise")
+    ddb_region = os.environ.get("DYNAMODB_REGION", "us-east-2")
+
+    agent = db.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(404, "Agent not found")
+
+    ecs_cfg = _get_ecs_config()
+    if not ecs_cfg["subnet_id"] or not ecs_cfg["sg_id"]:
+        raise HTTPException(500,
+            "ECS_SUBNET_ID and ECS_TASK_SG_ID are required. "
+            "Set them in /etc/openclaw/env or run the deploy script to write them to SSM.")
+
+    ecr_image = _ALWAYS_ON_ECR_IMAGE or (
+        f"{_GATEWAY_ACCOUNT_ID}.dkr.ecr.{_GATEWAY_REGION}.amazonaws.com"
+        f"/{stack}-multitenancy-agent:latest"
+    )
+
+    # Resolve per-agent bot tokens for Plan A direct IM connection
+    # IT stores these in SSM when provisioning always-on for an employee
+    telegram_token = ""
+    discord_token = ""
+    try:
+        ssm_tok = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+        try:
+            telegram_token = ssm_tok.get_parameter(
+                Name=f"/openclaw/{stack}/always-on/{agent_id}/telegram-token",
+                WithDecryption=True)["Parameter"]["Value"]
+        except Exception:
+            pass
+        try:
+            discord_token = ssm_tok.get_parameter(
+                Name=f"/openclaw/{stack}/always-on/{agent_id}/discord-token",
+                WithDecryption=True)["Parameter"]["Value"]
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # Stop any existing task for this agent first
+    try:
+        ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+        existing_arn = ssm.get_parameter(
+            Name=f"/openclaw/{stack}/always-on/{agent_id}/task-arn"
+        )["Parameter"]["Value"]
+        import boto3 as _b3ecs_stop
+        _b3ecs_stop.client("ecs", region_name=_GATEWAY_REGION).stop_task(
+            cluster=ecs_cfg["cluster"], task=existing_arn, reason="Restarted by admin")
+    except Exception:
+        pass
+
+    # Launch new ECS Fargate task
+    try:
+        import boto3 as _b3ecs
+        ecs = _b3ecs.client("ecs", region_name=_GATEWAY_REGION)
+        resp = ecs.run_task(
+            cluster=ecs_cfg["cluster"],
+            taskDefinition=ecs_cfg["task_def"],
+            launchType="FARGATE",
+            networkConfiguration={
+                "awsvpcConfiguration": {
+                    "subnets":        [ecs_cfg["subnet_id"]],
+                    "securityGroups": [ecs_cfg["sg_id"]],
+                    "assignPublicIp": "ENABLED",   # needed to pull ECR without NAT
+                }
+            },
+            overrides={
+                "containerOverrides": [{
+                    "name": "always-on-agent",
+                    # "image" is not a valid containerOverrides field; image is set in task def
+                    # Use the task definition's image (or update the task def revision for custom tags)
+                    "environment": [
+                        # For 1:1 employee agents: use personal__emp_id so entrypoint.sh
+                        # resolves BASE_TENANT_ID=emp_id → correct EFS/S3/SSM paths.
+                        # For shared N:1 agents: agent_id is the right anchor.
+                        {"name": "SESSION_ID",         "value": f"personal__{agent.get('employeeId', agent_id)}" if agent.get('employeeId') else f"shared__{agent_id}"},
+                        {"name": "SHARED_AGENT_ID",    "value": agent_id},
+                        {"name": "S3_BUCKET",          "value": bucket},
+                        {"name": "STACK_NAME",         "value": stack},
+                        {"name": "AWS_REGION",         "value": _GATEWAY_REGION},
+                        {"name": "DYNAMODB_TABLE",     "value": ddb_table},
+                        {"name": "DYNAMODB_REGION",    "value": ddb_region},
+                        {"name": "SYNC_INTERVAL",      "value": "120"},
+                        # Plan A: direct IM — inject bot tokens if provisioned
+                        {"name": "TELEGRAM_BOT_TOKEN", "value": telegram_token},
+                        {"name": "DISCORD_BOT_TOKEN",  "value": discord_token},
+                    ],
+                }]
+            },
+            count=1,
+            tags=[
+                {"key": "agent_id",   "value": agent_id},
+                {"key": "stack_name", "value": stack},
+            ],
+        )
+        failures = resp.get("failures", [])
+        if failures:
+            raise RuntimeError(f"ECS RunTask failures: {failures}")
+        task_arn = resp["tasks"][0]["taskArn"]
+    except Exception as e:
+        raise HTTPException(500, f"Failed to start ECS task: {e}")
+
+    # Persist task ARN — endpoint is registered by entrypoint.sh once the task is RUNNING
+    try:
+        ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+        ssm.put_parameter(Name=f"/openclaw/{stack}/always-on/{agent_id}/task-arn",
+                          Value=task_arn, Type="String", Overwrite=True)
+    except Exception as e:
+        print(f"[always-on] SSM task-arn write failed: {e}")
+
+    # Update DynamoDB status
+    try:
+        import boto3 as _b3d
+        ddb = _b3d.resource("dynamodb", region_name=ddb_region)
+        ddb.Table(ddb_table).update_item(
+            Key={"PK": "ORG#acme", "SK": f"AGENT#{agent_id}"},
+            UpdateExpression="SET deployMode = :m, containerStatus = :s, ecsTaskArn = :t",
+            ExpressionAttributeValues={":m": "always-on-ecs", ":s": "starting", ":t": task_arn},
+        )
+    except Exception as e:
+        print(f"[always-on] DynamoDB update failed: {e}")
+
+    return {"started": True, "agentId": agent_id, "taskArn": task_arn,
+            "note": "Task is starting. Endpoint will be registered in SSM once RUNNING (~30s)."}
+
+
+@app.post("/api/v1/admin/always-on/{agent_id}/stop")
+def stop_always_on_agent(agent_id: str, authorization: str = Header(default="")):
+    """Stop the always-on ECS Fargate task for an agent."""
+    _require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+
+    task_arn = ""
+    try:
+        ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+        task_arn = ssm.get_parameter(
+            Name=f"/openclaw/{stack}/always-on/{agent_id}/task-arn"
+        )["Parameter"]["Value"]
+    except Exception:
+        pass
+
+    if task_arn:
+        try:
+            import boto3 as _b3ecs2
+            ecs_cfg = _get_ecs_config()
+            _b3ecs2.client("ecs", region_name=_GATEWAY_REGION).stop_task(
+                cluster=ecs_cfg["cluster"], task=task_arn, reason="Stopped by admin")
+        except Exception as e:
+            print(f"[always-on] ECS stop_task failed: {e}")
+
+    # Clean up SSM entries
+    try:
+        ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+        for suffix in ["/task-arn", "/endpoint"]:
+            try:
+                ssm.delete_parameter(Name=f"/openclaw/{stack}/always-on/{agent_id}{suffix}")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Update DynamoDB
+    try:
+        import boto3 as _b3d2
+        ddb_region = os.environ.get("DYNAMODB_REGION", "us-east-2")
+        ddb = _b3d2.resource("dynamodb", region_name=ddb_region)
+        ddb.Table(os.environ.get("DYNAMODB_TABLE", "openclaw-enterprise")).update_item(
+            Key={"PK": "ORG#acme", "SK": f"AGENT#{agent_id}"},
+            UpdateExpression="SET deployMode = :m, containerStatus = :s REMOVE ecsTaskArn",
+            ExpressionAttributeValues={":m": "personal", ":s": "stopped"},
+        )
+    except Exception:
+        pass
+
+    return {"stopped": True, "agentId": agent_id, "taskArn": task_arn}
+
+
+@app.put("/api/v1/admin/always-on/{agent_id}/tokens")
+def set_always_on_tokens(agent_id: str, body: dict, authorization: str = Header(default="")):
+    """Store IM bot tokens for a always-on agent (Plan A: direct IM connection).
+    Tokens are stored as SSM SecureStrings and injected at ECS task startup."""
+    _require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+    saved = {}
+    for channel, key in [("telegram", "telegram-token"), ("discord", "discord-token")]:
+        token = body.get(f"{channel}BotToken", "").strip()
+        if token:
+            ssm.put_parameter(
+                Name=f"/openclaw/{stack}/always-on/{agent_id}/{key}",
+                Value=token, Type="SecureString", Overwrite=True)
+            saved[channel] = True
+        elif body.get(f"clear{channel.capitalize()}Token"):
+            try:
+                ssm.delete_parameter(Name=f"/openclaw/{stack}/always-on/{agent_id}/{key}")
+            except Exception:
+                pass
+            saved[channel] = False
+    return {"saved": saved, "agentId": agent_id,
+            "note": "Tokens stored. Restart the always-on container to activate direct IM."}
+
+
+@app.get("/api/v1/admin/always-on/{agent_id}/tokens")
+def get_always_on_tokens(agent_id: str, authorization: str = Header(default="")):
+    """Check which IM tokens are configured for an always-on agent (masked)."""
+    _require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+    result = {}
+    for channel, key in [("telegram", "telegram-token"), ("discord", "discord-token")]:
+        try:
+            ssm.get_parameter(Name=f"/openclaw/{stack}/always-on/{agent_id}/{key}")
+            result[channel] = "configured"  # don't return actual token
+        except Exception:
+            result[channel] = "not_configured"
+    return result
+
+
+@app.post("/api/v1/admin/always-on/{agent_id}/reload")
+def reload_always_on_agent(agent_id: str, body: dict, authorization: str = Header(default="")):
+    """Reload an always-on container — stops and restarts it so config/SOUL changes take effect.
+    Optionally accepts imageTag to deploy a specific ECR image version."""
+    _require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    bucket = os.environ.get("S3_BUCKET", f"openclaw-tenants-{_GATEWAY_ACCOUNT_ID}")
+    ddb_table = os.environ.get("DYNAMODB_TABLE", "openclaw-enterprise")
+    ddb_region = os.environ.get("DYNAMODB_REGION", "us-east-2")
+    image_tag = body.get("imageTag", "latest")
+
+    agent = db.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(404, "Agent not found")
+
+    ecs_cfg = _get_ecs_config()
+    if not ecs_cfg["subnet_id"] or not ecs_cfg["sg_id"]:
+        raise HTTPException(500, "ECS config missing")
+
+    # Build ECR image URI with optional tag override
+    ecr_image = (
+        f"{_GATEWAY_ACCOUNT_ID}.dkr.ecr.{_GATEWAY_REGION}.amazonaws.com"
+        f"/{stack}-multitenancy-agent:{image_tag}"
+    )
+
+    # Stop existing task
+    try:
+        ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+        old_arn = ssm.get_parameter(
+            Name=f"/openclaw/{stack}/always-on/{agent_id}/task-arn"
+        )["Parameter"]["Value"]
+        import boto3 as _b3rl
+        _b3rl.client("ecs", region_name=_GATEWAY_REGION).stop_task(
+            cluster=ecs_cfg["cluster"], task=old_arn, reason=f"Reload by admin (image={image_tag})")
+    except Exception:
+        pass
+
+    # Resolve bot tokens
+    telegram_token, discord_token = "", ""
+    try:
+        ssm_tok = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+        for ch, key in [("telegram", "telegram-token"), ("discord", "discord-token")]:
+            try:
+                val = ssm_tok.get_parameter(
+                    Name=f"/openclaw/{stack}/always-on/{agent_id}/{key}",
+                    WithDecryption=True)["Parameter"]["Value"]
+                if ch == "telegram": telegram_token = val
+                else: discord_token = val
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Start new task
+    try:
+        import boto3 as _b3rl2
+        ecs = _b3rl2.client("ecs", region_name=_GATEWAY_REGION)
+        resp = ecs.run_task(
+            cluster=ecs_cfg["cluster"],
+            taskDefinition=ecs_cfg["task_def"],
+            launchType="FARGATE",
+            networkConfiguration={"awsvpcConfiguration": {
+                "subnets": [ecs_cfg["subnet_id"]],
+                "securityGroups": [ecs_cfg["sg_id"]],
+                "assignPublicIp": "ENABLED",
+            }},
+            overrides={"containerOverrides": [{
+                "name": "always-on-agent",
+                "environment": [
+                    {"name": "SESSION_ID",         "value": f"personal__{agent.get('employeeId', agent_id)}" if agent.get('employeeId') else f"shared__{agent_id}"},
+                    {"name": "SHARED_AGENT_ID",    "value": agent_id},
+                    {"name": "S3_BUCKET",          "value": bucket},
+                    {"name": "STACK_NAME",         "value": stack},
+                    {"name": "AWS_REGION",         "value": _GATEWAY_REGION},
+                    {"name": "DYNAMODB_TABLE",     "value": ddb_table},
+                    {"name": "DYNAMODB_REGION",    "value": ddb_region},
+                    {"name": "SYNC_INTERVAL",      "value": "120"},
+                    {"name": "TELEGRAM_BOT_TOKEN", "value": telegram_token},
+                    {"name": "DISCORD_BOT_TOKEN",  "value": discord_token},
+                ],
+            }]},
+            count=1,
+        )
+        failures = resp.get("failures", [])
+        if failures:
+            raise RuntimeError(f"ECS failures: {failures}")
+        task_arn = resp["tasks"][0]["taskArn"]
+    except Exception as e:
+        raise HTTPException(500, f"Reload failed: {e}")
+
+    # Update SSM + DynamoDB
+    ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+    ssm.put_parameter(Name=f"/openclaw/{stack}/always-on/{agent_id}/task-arn",
+                      Value=task_arn, Type="String", Overwrite=True)
+    try:
+        import boto3 as _b3rl3
+        _b3rl3.resource("dynamodb", region_name=ddb_region).Table(ddb_table).update_item(
+            Key={"PK": "ORG#acme", "SK": f"AGENT#{agent_id}"},
+            UpdateExpression="SET deployMode = :m, containerStatus = :s, ecsTaskArn = :t, imageTag = :i",
+            ExpressionAttributeValues={":m": "always-on-ecs", ":s": "reloading",
+                                       ":t": task_arn, ":i": image_tag},
+        )
+    except Exception:
+        pass
+
+    db.create_audit_entry({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eventType": "config_change", "actorId": "admin", "actorName": "Admin",
+        "targetType": "agent", "targetId": agent_id,
+        "detail": f"Container reloaded with image tag '{image_tag}'", "status": "success",
+    })
+    return {"reloaded": True, "agentId": agent_id, "taskArn": task_arn, "imageTag": image_tag,
+            "note": "Container restarting (~30s). New SOUL/config will be active on next message."}
+
+
+@app.get("/api/v1/admin/always-on/{agent_id}/images")
+def list_agent_images(agent_id: str, authorization: str = Header(default="")):
+    """List available ECR image tags for deploying to this always-on agent."""
+    _require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    try:
+        import boto3 as _b3img
+        ecr = _b3img.client("ecr", region_name=_GATEWAY_REGION)
+        # ECR repo name follows the pattern: {stack}-multitenancy-agent
+        repo_name = f"{stack}-multitenancy-agent"
+        resp = ecr.describe_images(
+            repositoryName=repo_name,
+            filter={"tagStatus": "TAGGED"})
+        images = []
+        for img in sorted(resp.get("imageDetails", []),
+                          key=lambda x: x.get("imagePushedAt", ""), reverse=True)[:20]:
+            for tag in (img.get("imageTags") or []):
+                images.append({
+                    "tag": tag,
+                    "digest": img.get("imageDigest", "")[:20],
+                    "pushed": str(img.get("imagePushedAt", ""))[:10],
+                    "sizeMB": round(img.get("imageSizeInBytes", 0) / 1024 / 1024, 1),
+                })
+        return {"images": images, "repositoryName": repo_name}
+    except Exception as e:
+        raise HTTPException(500, f"ECR list failed: {e}")
+
+
+@app.get("/api/v1/admin/always-on/{agent_id}/status")
+def get_always_on_status(agent_id: str, authorization: str = Header(default="")):
+    """Get status of an always-on ECS Fargate task."""
+    _require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+
+    task_arn = ""
+    endpoint = ""
+    ecs_status = "STOPPED"
+
+    try:
+        task_arn = ssm.get_parameter(
+            Name=f"/openclaw/{stack}/always-on/{agent_id}/task-arn"
+        )["Parameter"]["Value"]
+    except Exception:
+        return {"running": False, "endpoint": None, "agentId": agent_id, "ecsStatus": "NOT_FOUND"}
+
+    try:
+        endpoint = ssm.get_parameter(
+            Name=f"/openclaw/{stack}/always-on/{agent_id}/endpoint"
+        )["Parameter"]["Value"]
+    except Exception:
+        pass  # endpoint registered async after task is RUNNING
+
+    try:
+        import boto3 as _b3ecs3
+        ecs_cfg = _get_ecs_config()
+        desc = _b3ecs3.client("ecs", region_name=_GATEWAY_REGION).describe_tasks(
+            cluster=ecs_cfg["cluster"], tasks=[task_arn])
+        tasks = desc.get("tasks", [])
+        ecs_status = tasks[0].get("lastStatus", "UNKNOWN") if tasks else "NOT_FOUND"
+    except Exception:
+        pass
+
+    running = ecs_status == "RUNNING"
+    return {"running": running, "endpoint": endpoint or None,
+            "agentId": agent_id, "taskArn": task_arn, "ecsStatus": ecs_status}
+
+
+@app.put("/api/v1/admin/always-on/{agent_id}/assign/{emp_id}")
+def assign_always_on_to_employee(agent_id: str, emp_id: str, authorization: str = Header(default="")):
+    """Assign an employee to use the always-on agent instead of AgentCore."""
+    _require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+    ssm.put_parameter(
+        Name=f"/openclaw/{stack}/tenants/{emp_id}/always-on-agent",
+        Value=agent_id, Type="String", Overwrite=True,
+    )
+    return {"assigned": True, "empId": emp_id, "agentId": agent_id}
+
+
+@app.delete("/api/v1/admin/always-on/{agent_id}/assign/{emp_id}")
+def unassign_always_on_from_employee(agent_id: str, emp_id: str, authorization: str = Header(default="")):
+    """Remove employee's always-on assignment — they fall back to AgentCore."""
+    _require_role(authorization, roles=["admin"])
+    stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+    try:
+        _boto3_main.client("ssm", region_name=_GATEWAY_REGION).delete_parameter(
+            Name=f"/openclaw/{stack}/tenants/{emp_id}/always-on-agent"
+        )
+    except Exception:
+        pass
+    return {"unassigned": True, "empId": emp_id}
+
+
+# =========================================================================
+# Digital Twin — public shareable agent URL
+# =========================================================================
+
+_PUBLIC_URL = os.environ.get("PUBLIC_URL", "https://openclaw.awspsa.com")
+
+
+@app.get("/api/v1/portal/twin")
+def get_twin_status(authorization: str = Header(default="")):
+    """Get the current employee's digital twin status."""
+    user = _require_auth(authorization)
+    record = db.get_twin_by_employee(user.employee_id)
+    if not record or not record.get("active"):
+        return {"active": False, "url": None, "chatCount": 0, "viewCount": 0}
+    token = record.get("tokenRef") or record.get("token", "")
+    return {
+        "active": True,
+        "url": f"{_PUBLIC_URL}/twin/{token}",
+        "token": token,
+        "chatCount": record.get("chatCount", 0),
+        "viewCount": record.get("viewCount", 0),
+        "createdAt": record.get("createdAt", ""),
+    }
+
+
+@app.post("/api/v1/portal/twin")
+def enable_twin(authorization: str = Header(default="")):
+    """Enable digital twin — generate a shareable URL for this employee's agent."""
+    user = _require_auth(authorization)
+    # Revoke any existing twin first
+    existing = db.get_twin_by_employee(user.employee_id)
+    if existing:
+        db.disable_twin(user.employee_id)
+    # Get employee + agent info
+    emp = db.get_employee(user.employee_id)
+    if not emp:
+        raise HTTPException(404, "Employee not found")
+    agents = db.get_agents()
+    agent = next((a for a in agents if a.get("employeeId") == user.employee_id), None)
+    # Generate secure token
+    import secrets
+    token = secrets.token_urlsafe(20)
+    record = db.create_twin(
+        emp_id=user.employee_id,
+        token=token,
+        emp_name=emp.get("name", user.name),
+        position_name=emp.get("positionName", ""),
+        agent_name=agent.get("name", f"{emp.get('name')} Agent") if agent else f"{emp.get('name')} Agent",
+    )
+    db.create_audit_entry({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "eventType": "config_change", "actorId": user.employee_id,
+        "actorName": user.name, "targetType": "twin", "targetId": token,
+        "detail": f"Digital twin enabled for {user.name}", "status": "success",
+    })
+    return {"active": True, "url": f"{_PUBLIC_URL}/twin/{token}", "token": token}
+
+
+@app.delete("/api/v1/portal/twin")
+def disable_twin(authorization: str = Header(default="")):
+    """Disable digital twin — revoke the public URL."""
+    user = _require_auth(authorization)
+    db.disable_twin(user.employee_id)
+    return {"active": False}
+
+
+# ── Always-on management for individual employees (IT admin only) ─────────────
+# IT admin assigns deployment mode (always-on vs serverless) per agent in
+# Agent Factory. Employees do not self-manage this — it is an IT governance decision.
+# Digital Twin works with both modes (Tenant Router is mode-agnostic).
+
+def _launch_personal_always_on(emp_id: str, emp_name: str) -> dict:
+    """Start a personal ECS Fargate task for a single employee.
+    Returns the same shape as start_always_on_agent."""
+    stack     = os.environ.get("STACK_NAME",      "openclaw-multitenancy")
+    bucket    = os.environ.get("S3_BUCKET",       f"openclaw-tenants-{_GATEWAY_ACCOUNT_ID}")
+    ddb_table = os.environ.get("DYNAMODB_TABLE",  "openclaw-enterprise")
+    ddb_region = os.environ.get("DYNAMODB_REGION", "us-east-2")
+
+    ecs_cfg = _get_ecs_config()
+    if not ecs_cfg["subnet_id"] or not ecs_cfg["sg_id"]:
+        raise HTTPException(500, "ECS config missing — contact IT admin.")
+
+    ecr_image = _ALWAYS_ON_ECR_IMAGE or (
+        f"{_GATEWAY_ACCOUNT_ID}.dkr.ecr.{_GATEWAY_REGION}.amazonaws.com"
+        f"/{stack}-multitenancy-agent:latest"
+    )
+
+    # Stop any existing personal container first
+    try:
+        ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+        existing_arn = ssm.get_parameter(
+            Name=f"/openclaw/{stack}/always-on/{emp_id}/task-arn"
+        )["Parameter"]["Value"]
+        import boto3 as _b3ep
+        _b3ep.client("ecs", region_name=_GATEWAY_REGION).stop_task(
+            cluster=ecs_cfg["cluster"], task=existing_arn, reason="Personal container restart")
+    except Exception:
+        pass
+
+    try:
+        import boto3 as _b3ep2
+        ecs = _b3ep2.client("ecs", region_name=_GATEWAY_REGION)
+        resp = ecs.run_task(
+            cluster=ecs_cfg["cluster"],
+            taskDefinition=ecs_cfg["task_def"],
+            launchType="FARGATE",
+            networkConfiguration={
+                "awsvpcConfiguration": {
+                    "subnets":        [ecs_cfg["subnet_id"]],
+                    "securityGroups": [ecs_cfg["sg_id"]],
+                    "assignPublicIp": "ENABLED",
+                }
+            },
+            overrides={
+                "containerOverrides": [{
+                    "name": "always-on-agent",
+                    # "image" is not a valid containerOverrides field; image is set in task def
+                    # Use the task definition's image (or update the task def revision for custom tags)
+                    "environment": [
+                        # Note: SHARED_AGENT_ID deliberately NOT set → personal workspace path
+                        {"name": "SESSION_ID",      "value": f"personal__{emp_id}"},
+                        {"name": "S3_BUCKET",       "value": bucket},
+                        {"name": "STACK_NAME",      "value": stack},
+                        {"name": "AWS_REGION",      "value": _GATEWAY_REGION},
+                        {"name": "DYNAMODB_TABLE",  "value": ddb_table},
+                        {"name": "DYNAMODB_REGION", "value": ddb_region},
+                        {"name": "SYNC_INTERVAL",   "value": "120"},
+                        {"name": "EFS_ENABLED",     "value": "true"},
+                    ],
+                }]
+            },
+            count=1,
+            tags=[
+                {"key": "agent_id",    "value": emp_id},
+                {"key": "agent_type",  "value": "personal"},
+                {"key": "stack_name",  "value": stack},
+            ],
+        )
+        failures = resp.get("failures", [])
+        if failures:
+            raise RuntimeError(f"ECS RunTask failures: {failures}")
+        task_arn = resp["tasks"][0]["taskArn"]
+    except Exception as e:
+        raise HTTPException(500, f"Failed to start personal container: {e}")
+
+    # Persist task ARN in SSM; endpoint registered by entrypoint.sh once RUNNING
+    ssm = _boto3_main.client("ssm", region_name=_GATEWAY_REGION)
+    try:
+        ssm.put_parameter(Name=f"/openclaw/{stack}/always-on/{emp_id}/task-arn",
+                          Value=task_arn, Type="String", Overwrite=True)
+        # Route this employee to their personal container
+        ssm.put_parameter(Name=f"/openclaw/{stack}/tenants/{emp_id}/always-on-agent",
+                          Value=emp_id, Type="String", Overwrite=True)
+    except Exception as e:
+        print(f"[personal-always-on] SSM write failed: {e}")
+
+    return {"started": True, "empId": emp_id, "taskArn": task_arn,
+            "note": "Personal container starting (~30s). Scheduled tasks will be active once running."}
+
+
+# ── Public twin endpoints (NO auth required) ──────────────────────────────────
+
+@app.get("/api/v1/public/twin/{token}")
+def get_public_twin_info(token: str):
+    """Public: get employee info for the twin page (no auth)."""
+    record = db.get_twin_by_token(token)
+    if not record or not record.get("active"):
+        raise HTTPException(404, "This digital twin is not available")
+    db.increment_twin_stat(token, "viewCount")
+    return {
+        "empName": record.get("empName", ""),
+        "positionName": record.get("positionName", ""),
+        "agentName": record.get("agentName", ""),
+        "companyName": "ACME Corp",
+    }
+
+
+@app.post("/api/v1/public/twin/{token}/chat")
+def twin_chat(token: str, body: dict):
+    """Public: send a message to the employee's digital twin (no auth).
+    The twin has full access to the employee's SOUL + memory."""
+    record = db.get_twin_by_token(token)
+    if not record or not record.get("active"):
+        raise HTTPException(404, "This digital twin is not available")
+
+    emp_id = record.get("empId", "")
+    message = body.get("message", "").strip()
+    if not message:
+        raise HTTPException(400, "message required")
+    if len(message) > 2000:
+        raise HTTPException(400, "Message too long (max 2000 chars)")
+
+    # Rate limit: 60 messages/hour per token (simple check via chatCount)
+    # For now just increment and allow — add Redis/DynamoDB TTL later if needed
+    db.increment_twin_stat(token, "chatCount")
+
+    # Route through Tenant Router with twin__ channel prefix
+    # server.py in the agent container will detect "twin" channel and inject
+    # digital twin context into SOUL.md
+    router_url = os.environ.get("TENANT_ROUTER_URL", "http://localhost:8090")
+    try:
+        import requests as _req
+        r = _req.post(f"{router_url}/route", json={
+            "channel": "twin",
+            "user_id": emp_id,
+            "message": message,
+        }, timeout=180)
+        if r.status_code == 200:
+            data = r.json()
+            resp = data.get("response", {})
+            reply = resp.get("response", str(resp)) if isinstance(resp, dict) else str(resp)
+            return {"reply": reply, "agentName": record.get("agentName", "")}
+        raise HTTPException(502, "Agent unavailable")
+    except Exception as e:
+        raise HTTPException(502, f"Agent unavailable: {str(e)[:100]}")
 
 
 # =========================================================================

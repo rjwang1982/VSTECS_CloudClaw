@@ -2,14 +2,16 @@ import { ReactNode, useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, Building2, Users, Bot, Puzzle, Activity,
-  Shield, DollarSign, Gamepad2, Settings, ChevronDown, ChevronRight,
+  ShieldCheck, Shield, DollarSign, Gamepad2, Settings, ChevronDown, ChevronRight,
   Bell, Search, Menu, X, CheckCircle, LogOut, User, FolderOpen, BookOpen,
-  Sun, Moon,
+  Sun, Moon, MessageSquare,
 } from 'lucide-react';
 import { useApprovals, useAlertRules, useAgents, useEmployees } from '../hooks/useApi';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
-import VSTECSLogo from './VSTECSLogo';
+import ClawForgeLogo from './ClawForgeLogo';
+import AdminAssistant from './AdminAssistant';
+import { ErrorBoundary } from './ui';
 import clsx from 'clsx';
 
 interface NavItem {
@@ -20,7 +22,8 @@ interface NavItem {
   badge?: number;
 }
 
-const NAV: NavItem[] = [
+// Full admin nav
+const ADMIN_NAV: NavItem[] = [
   { label: 'Dashboard', href: '/dashboard', icon: <LayoutDashboard size={20} /> },
   {
     label: 'Organization', icon: <Building2 size={20} />,
@@ -35,6 +38,8 @@ const NAV: NavItem[] = [
   { label: 'Workspace', href: '/workspace', icon: <FolderOpen size={20} /> },
   { label: 'Skill Market', href: '/skills', icon: <Puzzle size={20} /> },
   { label: 'Knowledge Base', href: '/knowledge', icon: <BookOpen size={20} /> },
+  { label: 'IM Channels', href: '/channels', icon: <MessageSquare size={20} /> },
+  { label: 'Security Center', href: '/security', icon: <ShieldCheck size={20} /> },
   { label: 'Monitor', href: '/monitor', icon: <Activity size={20} /> },
   { label: 'Audit Center', href: '/audit', icon: <Shield size={20} /> },
   { label: 'Approvals', href: '/approvals', icon: <CheckCircle size={20} /> },
@@ -42,6 +47,24 @@ const NAV: NavItem[] = [
   { label: 'Playground', href: '/playground', icon: <Gamepad2 size={20} /> },
   { label: 'Settings', href: '/settings', icon: <Settings size={20} /> },
 ];
+
+// Manager nav — own dept data only, no platform-wide settings
+const MANAGER_NAV: NavItem[] = [
+  { label: 'Dashboard', href: '/dashboard', icon: <LayoutDashboard size={20} /> },
+  {
+    label: 'My Team', icon: <Building2 size={20} />,
+    children: [
+      { label: 'Employees', href: '/org/employees' },
+      { label: 'Bindings & Routing', href: '/bindings' },
+    ],
+  },
+  { label: 'Approvals', href: '/approvals', icon: <CheckCircle size={20} /> },
+  { label: 'Monitor', href: '/monitor', icon: <Activity size={20} /> },
+  { label: 'Audit Center', href: '/audit', icon: <Shield size={20} /> },
+];
+
+// Choose nav based on role (set dynamically in Layout component)
+const NAV = ADMIN_NAV; // default — overridden per-role in component
 
 function SidebarItem({ item, collapsed }: { item: NavItem; collapsed: boolean }) {
   const location = useLocation();
@@ -124,6 +147,8 @@ export default function Layout({ children }: { children: ReactNode }) {
   const { theme, toggle: toggleTheme } = useTheme();
   const pendingApprovals = approvalsData?.pending?.length || 0;
   const activeAlerts = alertRules.filter(a => a.status === 'warning').length;
+  // Role-based nav
+  const NAV_ITEMS = user?.role === 'manager' ? MANAGER_NAV : ADMIN_NAV;
   const notifCount = pendingApprovals + activeAlerts;
 
   // Quick search results — searches pages, agents, employees
@@ -184,9 +209,19 @@ export default function Layout({ children }: { children: ReactNode }) {
 
         {/* Nav */}
         <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
-          {NAV.map(item => (
+          {NAV_ITEMS.map(item => (
             <SidebarItem key={item.label} item={item} collapsed={!sidebarOpen} />
           ))}
+          {/* Manager: quick link to own Portal */}
+          {user?.role === 'manager' && (
+            <button
+              onClick={() => navigate('/portal')}
+              className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm text-text-secondary hover:bg-dark-hover hover:text-text-primary transition-colors mt-2 border-t border-dark-border/30 pt-4"
+            >
+              <Users size={20} />
+              {sidebarOpen && <span>My Portal</span>}
+            </button>
+          )}
         </nav>
 
         {/* Theme toggle + Collapse */}
@@ -280,9 +315,12 @@ export default function Layout({ children }: { children: ReactNode }) {
 
         {/* Page content */}
         <main className="flex-1 overflow-y-auto p-4 lg:p-6">
-          {children}
+          <ErrorBoundary>{children}</ErrorBoundary>
         </main>
       </div>
+
+      {/* Floating Admin Assistant — admin only */}
+      {user?.role === 'admin' && <AdminAssistant />}
     </div>
   );
 }

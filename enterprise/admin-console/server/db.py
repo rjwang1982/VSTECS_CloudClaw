@@ -93,6 +93,39 @@ def get_positions() -> list[dict]:
 def get_employees() -> list[dict]:
     return _query("EMP#")
 
+def get_employee(emp_id: str) -> Optional[dict]:
+    return _get_item(f"EMP#{emp_id}")
+
+def add_employee_channel(emp_id: str, channel: str) -> None:
+    """Add a channel to the employee's channels list (idempotent)."""
+    try:
+        _get_table().update_item(
+            Key={"PK": ORG_PK, "SK": f"EMP#{emp_id}"},
+            UpdateExpression="SET #ch = list_append(if_not_exists(#ch, :empty), :val)",
+            ConditionExpression="not contains(#ch, :channel)",
+            ExpressionAttributeNames={"#ch": "channels"},
+            ExpressionAttributeValues={":val": [channel], ":empty": [], ":channel": channel},
+        )
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
+            print(f"[db] add_employee_channel error: {e}")
+
+def remove_employee_channel(emp_id: str, channel: str) -> None:
+    """Remove a channel from the employee's channels list."""
+    try:
+        emp = get_employee(emp_id)
+        if not emp:
+            return
+        channels = [c for c in emp.get("channels", []) if c != channel]
+        _get_table().update_item(
+            Key={"PK": ORG_PK, "SK": f"EMP#{emp_id}"},
+            UpdateExpression="SET #ch = :val",
+            ExpressionAttributeNames={"#ch": "channels"},
+            ExpressionAttributeValues={":val": channels},
+        )
+    except ClientError as e:
+        print(f"[db] remove_employee_channel error: {e}")
+
 def get_agents() -> list[dict]:
     items = _query("AGENT#")
     # Convert qualityScore from string back to float
@@ -235,10 +268,63 @@ def get_usage_for_agent(agent_id: str) -> list[dict]:
 # === Sessions ===
 
 def get_sessions() -> list[dict]:
-    return _query("SESSION#")
+    """Return all sessions, injecting 'id' from the DynamoDB SK."""
+    try:
+        resp = _get_table().query(
+            KeyConditionExpression=Key("PK").eq(ORG_PK) & Key("SK").begins_with("SESSION#")
+        )
+        items = []
+        for item in resp.get("Items", []):
+            session_id = item.get("SK", "").replace("SESSION#", "", 1)
+            cleaned = _clean(item)
+            if "id" not in cleaned or not cleaned["id"]:
+                cleaned["id"] = session_id
+            items.append(cleaned)
+        return items
+    except ClientError as e:
+        print(f"[db] DynamoDB query error: {e}")
+        return []
+
+# === Pairing Tokens (employee IM self-service binding) ===
+
+def create_pair_token(token: str, emp_id: str, channel: str) -> dict:
+    """Create a short-lived pairing token (15 min TTL) for IM self-service binding."""
+    import time as _t
+    from datetime import datetime, timezone
+    item = {
+        "token": token,
+        "employeeId": emp_id,
+        "channel": channel,
+        "status": "pending",
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "ttl": int(_t.time()) + 900,
+    }
+    _put_item(f"PAIR#{token}", item, "TYPE#pair", f"PAIR#{token}")
+    return item
+
+def get_pair_token(token: str) -> dict | None:
+    return _get_item(f"PAIR#{token}")
+
+def consume_pair_token(token: str) -> dict | None:
+    """Atomically validate and mark token as completed. Returns token data if valid."""
+    import time as _t
+    item = _get_item(f"PAIR#{token}")
+    if not item:
+        return None
+    if item.get("status") != "pending":
+        return None  # already used
+    if item.get("ttl", 0) < int(_t.time()):
+        return None  # expired
+    _put_item(f"PAIR#{token}", {**item, "status": "completed"}, "TYPE#pair", f"PAIR#{token}")
+    return item
+
 
 def get_session(session_id: str) -> dict | None:
-    return _get_item(f"SESSION#{session_id}")
+    """Return a single session by ID, injecting 'id' field."""
+    item = _get_item(f"SESSION#{session_id}")
+    if item and ("id" not in item or not item["id"]):
+        item["id"] = session_id
+    return item
 
 # === Employee Activity ===
 
@@ -280,3 +366,60 @@ def get_session_conversation(session_id: str) -> list[dict]:
 def create_session_conversation(session_id: str, messages: list[dict]):
     for i, msg in enumerate(messages):
         _put_item(f"CONV#{session_id}#{i:04d}", {"sessionId": session_id, "seq": i, **msg})
+
+
+# === Digital Twin (public shareable agent URL) ===
+
+def create_twin(emp_id: str, token: str, emp_name: str, position_name: str, agent_name: str) -> dict:
+    """Enable digital twin for an employee — generates a public share token."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    item = {
+        "empId": emp_id,
+        "empName": emp_name,
+        "positionName": position_name,
+        "agentName": agent_name,
+        "token": token,
+        "active": True,
+        "createdAt": now,
+        "viewCount": 0,
+        "chatCount": 0,
+    }
+    # TWIN#token — primary lookup by token
+    _put_item(f"TWIN#{token}", item, f"EMP#{emp_id}", f"TWIN#{token}")
+    # TWINOWNER#emp_id — lookup by employee (only one twin per employee)
+    _put_item(f"TWINOWNER#{emp_id}", {**item, "tokenRef": token}, "TYPE#twin", f"TWINOWNER#{emp_id}")
+    return item
+
+
+def get_twin_by_token(token: str) -> dict | None:
+    return _get_item(f"TWIN#{token}")
+
+
+def get_twin_by_employee(emp_id: str) -> dict | None:
+    return _get_item(f"TWINOWNER#{emp_id}")
+
+
+def disable_twin(emp_id: str) -> None:
+    """Revoke digital twin — mark token inactive and remove owner record."""
+    owner = get_twin_by_employee(emp_id)
+    if owner:
+        token = owner.get("tokenRef") or owner.get("token")
+        if token:
+            item = _get_item(f"TWIN#{token}")
+            if item:
+                _put_item(f"TWIN#{token}", {**item, "active": False}, f"EMP#{emp_id}", f"TWIN#{token}")
+        _get_table().delete_item(Key={"PK": ORG_PK, "SK": f"TWINOWNER#{emp_id}"})
+
+
+def increment_twin_stat(token: str, field: str) -> None:
+    """Increment viewCount or chatCount atomically."""
+    try:
+        _get_table().update_item(
+            Key={"PK": ORG_PK, "SK": f"TWIN#{token}"},
+            UpdateExpression="ADD #f :one",
+            ExpressionAttributeNames={"#f": field},
+            ExpressionAttributeValues={":one": 1},
+        )
+    except Exception:
+        pass

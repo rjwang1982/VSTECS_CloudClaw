@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { FolderOpen, FolderClosed, File, Lock, Edit3, User, ChevronRight, ChevronDown, Eye, GitCompare, Save, Globe, Briefcase, Bot, ArrowRight, Loader, Search } from 'lucide-react';
+import { FolderOpen, FolderClosed, File, Lock, Edit3, User, ChevronRight, Save, Globe, Briefcase, Bot, ArrowRight, Loader, Search, Code, BookOpen, AlertTriangle, X } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
 import { Card, Badge, Button, PageHeader } from '../../components/ui';
 import { useAgents, usePositions, useWorkspaceTree } from '../../hooks/useApi';
 import { api } from '../../api/client';
@@ -107,9 +108,13 @@ export default function Workspace() {
   const [selectedFileKey, setSelectedFileKey] = useState('');
   const [fileContent, setFileContent] = useState('');
   const [editContent, setEditContent] = useState('');
+  const [isEditing, setIsEditing] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [filterText, setFilterText] = useState('');
+  const [viewMode, setViewMode] = useState<'raw' | 'rendered'>('rendered');
+  const [confirmSoul, setConfirmSoul] = useState(false);
+  const [pendingFileSwitch, setPendingFileSwitch] = useState<WsFile | null>(null);
 
   // Set agent from URL param or default
   useEffect(() => {
@@ -160,8 +165,11 @@ export default function Workspace() {
   // Filter
   const matchFilter = (f: WsFile) => !filterText || f.name.toLowerCase().includes(filterText.toLowerCase());
 
-  const handleSelectFile = async (file: WsFile) => {
+  const isDirty = isEditing && editContent !== fileContent;
+
+  const loadFile = async (file: WsFile) => {
     setSelectedFileKey(file.key);
+    setIsEditing(false);
     setLoading(true);
     try {
       const resp = await api.get<{ key: string; content: string; size: number }>(`/workspace/file?key=${encodeURIComponent(file.key)}`);
@@ -174,21 +182,38 @@ export default function Workspace() {
     setLoading(false);
   };
 
+  const handleSelectFile = (file: WsFile) => {
+    if (isDirty) {
+      setPendingFileSwitch(file);
+    } else {
+      loadFile(file);
+    }
+  };
+
   const handleSave = async () => {
-    if (!selectedFileKey) return;
+    if (!selectedFileKey || !isDirty) return;
+    // Warn before saving SOUL.md — it immediately affects live agent behavior
+    if (selectedFileKey.includes('SOUL.md') && !confirmSoul) {
+      setConfirmSoul(true);
+      return;
+    }
+    setConfirmSoul(false);
     setSaving(true);
     try {
       await api.put('/workspace/file', { key: selectedFileKey, content: editContent });
       setFileContent(editContent);
-      setTimeout(() => setSaving(false), 1000);
+      setIsEditing(false);
+      setTimeout(() => setSaving(false), 800);
     } catch { setSaving(false); }
   };
 
   const handleAgentChange = (id: string) => {
+    if (isDirty && !window.confirm('You have unsaved changes. Discard and switch agent?')) return;
     setSelectedAgent(id);
     setSelectedFileKey('');
     setFileContent('');
     setEditContent('');
+    setIsEditing(false);
   };
 
   const selectedFile = allFiles.find(f => f.key === selectedFileKey);
@@ -199,10 +224,28 @@ export default function Workspace() {
         title="Workspace Manager"
         description="Three-layer file system — Global (IT locked) → Position → Personal"
         actions={
-          <div className="flex gap-2">
-            <Button variant="primary" disabled={!selectedFile || selectedFile.locked || saving} onClick={handleSave}>
-              <Save size={16} /> {saving ? '✓ Saved' : 'Save'}
-            </Button>
+          <div className="flex gap-2 items-center">
+            {selectedFile && selectedFile.name.endsWith('.md') && !isEditing && (
+              <Button variant={viewMode === 'rendered' ? 'primary' : 'default'} size="sm" onClick={() => setViewMode(viewMode === 'raw' ? 'rendered' : 'raw')}>
+                {viewMode === 'raw' ? <><BookOpen size={14} /> Rendered</> : <><Code size={14} /> Raw</>}
+              </Button>
+            )}
+            {selectedFile && !selectedFile.locked && !isEditing && (
+              <Button variant="default" size="sm" onClick={() => setIsEditing(true)}>
+                <Edit3 size={14} /> Edit
+              </Button>
+            )}
+            {isEditing && (
+              <Button variant="default" size="sm" onClick={() => { setEditContent(fileContent); setIsEditing(false); }}>
+                <X size={14} /> Cancel
+              </Button>
+            )}
+            {isEditing && (
+              <Button variant="primary" disabled={!isDirty || saving} onClick={handleSave}>
+                <Save size={16} />
+                {saving ? '✓ Saved' : isDirty ? 'Save *' : 'Save'}
+              </Button>
+            )}
           </div>
         }
       />
@@ -292,6 +335,39 @@ export default function Workspace() {
           </div>
         </Card>
 
+        {/* Unsaved changes — switch file warning */}
+        {pendingFileSwitch && (
+          <div className="lg:col-span-3 mb-2">
+            <div className="flex items-center gap-3 rounded-xl bg-warning/10 border border-warning/30 px-4 py-3 text-sm">
+              <AlertTriangle size={16} className="text-warning shrink-0" />
+              <span className="text-text-primary flex-1">You have unsaved changes to <strong>{selectedFile?.name}</strong>. Discard and open {pendingFileSwitch.name}?</span>
+              <Button size="sm" variant="danger" onClick={() => { loadFile(pendingFileSwitch); setPendingFileSwitch(null); }}>Discard</Button>
+              <Button size="sm" variant="default" onClick={() => setPendingFileSwitch(null)}>Keep editing</Button>
+            </div>
+          </div>
+        )}
+
+        {/* SOUL.md save confirmation */}
+        {confirmSoul && (
+          <div className="lg:col-span-3 mb-2">
+            <div className="flex items-center gap-3 rounded-xl bg-danger/10 border border-danger/30 px-4 py-3 text-sm">
+              <AlertTriangle size={16} className="text-danger shrink-0" />
+              <span className="text-text-primary flex-1"><strong>Warning:</strong> Saving SOUL.md changes affects live agent behavior immediately. All new sessions will use the updated SOUL.</span>
+              <Button size="sm" variant="danger" onClick={async () => {
+                setConfirmSoul(false);
+                setSaving(true);
+                try {
+                  await api.put('/workspace/file', { key: selectedFileKey, content: editContent });
+                  setFileContent(editContent);
+                  setIsEditing(false);
+                  setTimeout(() => setSaving(false), 800);
+                } catch { setSaving(false); }
+              }}>Save anyway</Button>
+              <Button size="sm" variant="default" onClick={() => setConfirmSoul(false)}>Cancel</Button>
+            </div>
+          </div>
+        )}
+
         {/* File editor / viewer */}
         <Card className="lg:col-span-3">
           {loading ? (
@@ -301,11 +377,15 @@ export default function Workspace() {
               <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-2">
                   <File size={18} className={layerConfig[selectedFile.layer].text} />
-                  <h3 className="text-lg font-semibold text-text-primary">{selectedFile.name}</h3>
+                  <h3 className="text-lg font-semibold text-text-primary">
+                    {selectedFile.name}
+                    {isDirty && <span className="ml-1 text-warning text-sm">●</span>}
+                  </h3>
                   <Badge color={selectedFile.layer === 'global' ? 'default' : selectedFile.layer === 'position' ? 'primary' : 'success'}>
                     {selectedFile.layer}
                   </Badge>
                   {selectedFile.locked && <Badge color="warning">🔒 Read-only</Badge>}
+                  {isEditing && <Badge color="info">✏️ Editing</Badge>}
                 </div>
                 <div className="flex items-center gap-3 text-xs text-text-muted">
                   <span>{selectedFile.size > 1024 ? `${(selectedFile.size / 1024).toFixed(1)} KB` : `${selectedFile.size} B`}</span>
@@ -313,12 +393,31 @@ export default function Workspace() {
                 </div>
               </div>
 
-              {selectedFile.locked ? (
-                <pre className={clsx('rounded-2xl p-4 text-sm text-text-secondary whitespace-pre-wrap font-mono leading-relaxed min-h-[450px] max-h-[550px] overflow-y-auto border-l-2',
-                  layerConfig[selectedFile.layer].bg, layerConfig[selectedFile.layer].border)}>
-                  {fileContent}
-                </pre>
+              {/* Read view: locked file OR non-editing editable file */}
+              {(selectedFile.locked || !isEditing) ? (
+                selectedFile.name.endsWith('.md') && viewMode === 'rendered' ? (
+                  <div className={clsx('rounded-2xl p-5 min-h-[450px] max-h-[550px] overflow-y-auto border-l-2 prose prose-invert prose-sm max-w-none',
+                    '[&_h1]:text-lg [&_h1]:font-bold [&_h1]:mt-4 [&_h1]:mb-2',
+                    '[&_h2]:text-base [&_h2]:font-semibold [&_h2]:mt-3 [&_h2]:mb-1.5',
+                    '[&_h3]:text-sm [&_h3]:font-medium [&_h3]:mt-2 [&_h3]:mb-1',
+                    '[&_p]:my-1.5 [&_ul]:my-1 [&_ol]:my-1 [&_li]:my-0.5',
+                    '[&_code]:bg-surface-container-highest [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded-lg [&_code]:text-xs',
+                    '[&_pre]:bg-surface-container-highest [&_pre]:p-3 [&_pre]:rounded-xl [&_pre]:my-2',
+                    '[&_table]:text-xs [&_th]:px-3 [&_th]:py-1.5 [&_th]:text-left [&_th]:border-b [&_th]:border-dark-border/30',
+                    '[&_td]:px-3 [&_td]:py-1 [&_td]:border-b [&_td]:border-dark-border/20',
+                    '[&_strong]:text-text-primary [&_a]:text-primary',
+                    '[&_blockquote]:border-l-2 [&_blockquote]:border-primary/30 [&_blockquote]:pl-3 [&_blockquote]:text-text-secondary',
+                    layerConfig[selectedFile.layer].bg, layerConfig[selectedFile.layer].border)}>
+                    <ReactMarkdown>{fileContent}</ReactMarkdown>
+                  </div>
+                ) : (
+                  <pre className={clsx('rounded-2xl p-4 text-sm text-text-secondary whitespace-pre-wrap font-mono leading-relaxed min-h-[450px] max-h-[550px] overflow-y-auto border-l-2',
+                    layerConfig[selectedFile.layer].bg, layerConfig[selectedFile.layer].border)}>
+                    {fileContent}
+                  </pre>
+                )
               ) : (
+                /* Edit mode */
                 <textarea
                   value={editContent}
                   onChange={e => setEditContent(e.target.value)}
@@ -328,15 +427,17 @@ export default function Workspace() {
               )}
 
               <div className="mt-4 pt-3 border-t border-dark-border/30 flex items-center justify-between text-xs text-text-muted">
-                <span className="font-mono truncate max-w-[60%]">s3://{selectedFile.key}</span>
-                <span>{fileContent.split('\n').length} lines · {fileContent.length} chars</span>
+                <span className="font-mono truncate max-w-[60%]" title={`s3://${selectedFile.key}`}>
+                  s3://.../{selectedFile.key.split('/').slice(-2).join('/')}
+                </span>
+                <span>{(isEditing ? editContent : fileContent).split('\n').length} lines · {(isEditing ? editContent : fileContent).length} chars</span>
               </div>
             </div>
           ) : (
             <div className="flex flex-col items-center justify-center h-full text-text-muted py-20">
               <FolderOpen size={48} className="mb-4 opacity-20" />
               <p className="text-lg mb-2">Select a file from the explorer</p>
-              <p className="text-sm">Click any file to view or edit. Files are read from S3 in real-time.</p>
+              <p className="text-sm">Click any file to view. Use the Edit button to make changes.</p>
             </div>
           )}
         </Card>

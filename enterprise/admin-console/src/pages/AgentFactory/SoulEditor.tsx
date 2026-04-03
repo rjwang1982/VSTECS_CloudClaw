@@ -1,8 +1,8 @@
 import { useState, useMemo, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Save, Lock, Edit3, Eye, User, Loader } from 'lucide-react';
+import { ArrowLeft, Save, Lock, Edit3, Eye, User, Loader, AlertTriangle } from 'lucide-react';
 import { Card, Badge, Button, PageHeader, StatusDot, Tabs } from '../../components/ui';
-import { useAgent, useAgentSoul, usePositions, useSaveSoul } from '../../hooks/useApi';
+import { useAgent, useAgentSoul, usePositions, useEmployees, useSaveSoul } from '../../hooks/useApi';
 import { CHANNEL_LABELS } from '../../types';
 import type { ChannelType } from '../../types';
 
@@ -12,8 +12,11 @@ export default function SoulEditor() {
   const { data: agent, isLoading: agentLoading } = useAgent(agentId || '');
   const { data: soulLayers, isLoading: soulLoading } = useAgentSoul(agentId || '');
   const { data: positions = [] } = usePositions();
+  const { data: employees = [] } = useEmployees();
   const saveSoul = useSaveSoul();
   const position = positions.find(p => p.id === agent?.positionId);
+  // Count how many agents share the same position (to warn about position-level edits)
+  const positionAgentCount = employees.filter(e => e.positionId === agent?.positionId && e.agentId).length;
 
   const [globalContent, setGlobalContent] = useState('');
   const [positionContent, setPositionContent] = useState('');
@@ -84,7 +87,9 @@ export default function SoulEditor() {
           <div className="flex gap-3">
             <Button variant="default" onClick={() => navigate('/agents')}><ArrowLeft size={16} /> Back</Button>
             <Button variant="default" onClick={() => setShowMergedPreview(!showMergedPreview)}><Eye size={16} /> {showMergedPreview ? 'Hide Preview' : 'Preview Merged'}</Button>
-            <Button variant="primary" onClick={handleSave}><Save size={16} /> {saved ? '✓ Saved' : 'Save'}</Button>
+            <Button variant="primary" onClick={handleSave} disabled={activeTab === 'global'}>
+              <Save size={16} /> {saved ? '✓ Saved' : `Save ${activeTab === 'position' ? 'Position' : activeTab === 'personal' ? 'Personal' : '(read-only)'}`}
+            </Button>
           </div>
         }
       />
@@ -99,9 +104,9 @@ export default function SoulEditor() {
           <div>
             <p className="text-xs text-text-muted">Versions</p>
             <div className="flex gap-1 mt-0.5">
-              <Badge>G:v{agent.soulVersions.global}</Badge>
-              <Badge color="primary">P:v{agent.soulVersions.position}</Badge>
-              <Badge color="success">U:v{agent.soulVersions.personal}</Badge>
+              <Badge>G:v{agent.soulVersions?.global ?? 0}</Badge>
+              <Badge color="primary">P:v{agent.soulVersions?.position ?? 0}</Badge>
+              <Badge color="success">U:v{agent.soulVersions?.personal ?? 0}</Badge>
             </div>
           </div>
         </div>
@@ -137,8 +142,11 @@ export default function SoulEditor() {
               )}
               {activeTab === 'position' && (
                 <div>
-                  <div className="mb-3 rounded-lg bg-success/5 border border-success/20 px-3 py-2 text-sm text-success">
-                    Position: {agent.positionName} — affects all agents in this position
+                  <div className="mb-3 rounded-lg bg-warning/10 border border-warning/30 px-3 py-2 flex items-start gap-2">
+                    <AlertTriangle size={15} className="text-warning mt-0.5 shrink-0" />
+                    <p className="text-xs text-warning">
+                      <strong>Position-level edit:</strong> This change affects all <strong>{positionAgentCount}</strong> agent{positionAgentCount !== 1 ? 's' : ''} with position "{agent.positionName}". To change only this agent, use the Personal tab instead.
+                    </p>
                   </div>
                   <textarea
                     value={positionContent}

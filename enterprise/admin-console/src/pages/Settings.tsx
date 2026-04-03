@@ -1,223 +1,395 @@
-import { useState } from 'react';
-import { Settings as SettingsIcon, Cpu, Server, Globe, Key, Zap, Shield, HardDrive, Database, Cloud, AlertTriangle, Lock } from 'lucide-react';
-import { Card, Badge, Button, PageHeader, Toggle, StatusDot, Table, Tabs } from '../components/ui';
-import { useModelConfig, useSecurityConfig, useServiceStatus, usePositions, useUpdateSecurityConfig } from '../hooks/useApi';
+import { useState, useEffect } from 'react';
+import {
+  User, Globe, MessageSquare, Server,
+  Eye, EyeOff, Check, X, RefreshCw, HardDrive,
+  Cpu, MemoryStick, Wifi, WifiOff,
+  ChevronDown,
+} from 'lucide-react';
+import { Card, Badge, Button, PageHeader, Tabs, Select } from '../components/ui';
+import {
+  useAdminAssistant, useUpdateAdminAssistant,
+  useChangeAdminPassword, useSystemStats, useServiceStatus, useModelConfig,
+} from '../hooks/useApi';
+import { useAuth } from '../contexts/AuthContext';
 
-export default function Settings() {
-  const { data: modelConfig } = useModelConfig();
-  const { data: securityConfig } = useSecurityConfig();
-  const updateSecurity = useUpdateSecurityConfig();
+// ─── helpers ────────────────────────────────────────────────────────────────
+
+function fmtBytes(b: number) {
+  if (b > 1e9) return `${(b / 1e9).toFixed(1)} GB`;
+  if (b > 1e6) return `${(b / 1e6).toFixed(0)} MB`;
+  return `${b} B`;
+}
+
+function ProgressBar({ pct, color = 'primary' }: { pct: number; color?: string }) {
+  const colors: Record<string, string> = {
+    primary: 'bg-primary', success: 'bg-success', warning: 'bg-warning', danger: 'bg-danger',
+  };
+  const barColor = pct > 85 ? colors.danger : pct > 65 ? colors.warning : colors.success;
+  return (
+    <div className="h-1.5 w-full rounded-full bg-dark-border/40 overflow-hidden">
+      <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${Math.min(pct, 100)}%` }} />
+    </div>
+  );
+}
+
+// ─── Account Tab ─────────────────────────────────────────────────────────────
+
+function AccountTab() {
+  const { user } = useAuth();
+  const changePw = useChangeAdminPassword();
+  const [current, setCurrent] = useState('');
+  const [next, setNext] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [showPw, setShowPw] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const handleChange = async () => {
+    if (next.length < 8) { setMsg({ ok: false, text: 'Password must be at least 8 characters' }); return; }
+    if (next !== confirm) { setMsg({ ok: false, text: 'Passwords do not match' }); return; }
+    try {
+      await changePw.mutateAsync(next);
+      setMsg({ ok: true, text: 'Password updated successfully' });
+      setCurrent(''); setNext(''); setConfirm('');
+    } catch {
+      setMsg({ ok: false, text: 'Failed to update password' });
+    }
+  };
+
+  return (
+    <div className="space-y-6 max-w-lg">
+      {/* Profile */}
+      <Card>
+        <h3 className="text-sm font-semibold text-text-primary mb-4 flex items-center gap-2">
+          <User size={16} className="text-primary" /> Admin Profile
+        </h3>
+        <div className="space-y-3">
+          {[
+            { label: 'Name', value: user?.name || 'Admin' },
+            { label: 'Role', value: 'Administrator' },
+            { label: 'Employee ID', value: user?.id || '—' },
+          ].map(f => (
+            <div key={f.label} className="flex items-center justify-between rounded-xl bg-surface-dim px-4 py-3">
+              <span className="text-xs text-text-muted">{f.label}</span>
+              <span className="text-sm text-text-primary font-medium">{f.value}</span>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      {/* Password */}
+      <Card>
+        <h3 className="text-sm font-semibold text-text-primary mb-4 flex items-center gap-2">
+          <User size={16} className="text-primary" /> Change Password
+        </h3>
+        <div className="space-y-3">
+          {[
+            { label: 'Current password', value: current, set: setCurrent },
+            { label: 'New password', value: next, set: setNext },
+            { label: 'Confirm new password', value: confirm, set: setConfirm },
+          ].map(f => (
+            <div key={f.label}>
+              <label className="mb-1.5 block text-xs font-medium text-text-secondary">{f.label}</label>
+              <div className="relative">
+                <input
+                  type={showPw ? 'text' : 'password'}
+                  value={f.value}
+                  onChange={e => f.set(e.target.value)}
+                  className="w-full rounded-xl border border-dark-border/60 bg-surface-dim px-4 py-2.5 pr-10 text-sm text-text-primary focus:border-primary/60 focus:outline-none"
+                />
+                <button onClick={() => setShowPw(s => !s)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-primary">
+                  {showPw ? <EyeOff size={15} /> : <Eye size={15} />}
+                </button>
+              </div>
+            </div>
+          ))}
+          {msg && (
+            <div className={`flex items-center gap-2 rounded-xl px-3 py-2.5 text-xs ${msg.ok ? 'bg-success/10 text-success' : 'bg-danger/10 text-danger'}`}>
+              {msg.ok ? <Check size={14} /> : <X size={14} />} {msg.text}
+            </div>
+          )}
+          <Button variant="primary" className="w-full" disabled={changePw.isPending}
+            onClick={handleChange}>
+            {changePw.isPending ? 'Updating…' : 'Update Password'}
+          </Button>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+// ─── Interface Tab ────────────────────────────────────────────────────────────
+
+function InterfaceTab() {
+  const languages = [
+    { code: 'en', name: 'English', flag: '🇺🇸', available: true },
+    { code: 'zh', name: '中文 (简体)', flag: '🇨🇳', available: false },
+    { code: 'ja', name: '日本語', flag: '🇯🇵', available: false },
+  ];
+
+  return (
+    <div className="space-y-6 max-w-lg">
+      <Card>
+        <h3 className="text-sm font-semibold text-text-primary mb-4 flex items-center gap-2">
+          <Globe size={16} className="text-primary" /> Language
+        </h3>
+        <div className="space-y-2">
+          {languages.map(l => (
+            <label key={l.code}
+              className={`flex items-center justify-between rounded-xl px-4 py-3 transition-colors ${l.available ? 'bg-primary/10 border border-primary/30 cursor-pointer' : 'bg-surface-dim border border-transparent opacity-40 cursor-not-allowed'}`}>
+              <div className="flex items-center gap-3">
+                <span className="text-xl">{l.flag}</span>
+                <span className={`text-sm font-medium ${l.available ? 'text-text-primary' : 'text-text-muted'}`}>{l.name}</span>
+                {!l.available && <Badge color="default">Coming soon</Badge>}
+              </div>
+              <div className={`h-4 w-4 rounded-full border-2 flex items-center justify-center ${l.available ? 'border-primary bg-primary' : 'border-dark-border'}`}>
+                {l.available && <div className="h-2 w-2 rounded-full bg-white" />}
+              </div>
+            </label>
+          ))}
+        </div>
+        <p className="mt-3 text-xs text-text-muted">
+          Multi-language support is in development. Chinese and Japanese interfaces are planned for a future release.
+        </p>
+      </Card>
+    </div>
+  );
+}
+
+// ─── Admin Assistant Tab ──────────────────────────────────────────────────────
+
+const ALL_COMMANDS = [
+  'list_employees', 'list_agents', 'get_agent', 'list_sessions', 'list_audit',
+  'list_approvals', 'approve_request', 'deny_request', 'get_service_status',
+  'get_model_config', 'update_model_config', 'list_user_mappings',
+  'get_system_stats', 'list_knowledge_bases',
+];
+
+const COMMAND_DESCRIPTIONS: Record<string, string> = {
+  list_employees: 'Query employee list and details',
+  list_agents: 'List all AI agents and their status',
+  get_agent: 'Get a specific agent\'s full configuration',
+  list_sessions: 'View active and recent agent sessions',
+  list_audit: 'Query audit log entries',
+  list_approvals: 'View pending approval requests',
+  approve_request: 'Approve a permission request',
+  deny_request: 'Deny a permission request',
+  get_service_status: 'Check health of platform services',
+  get_model_config: 'Read current model configuration',
+  update_model_config: 'Change the default model for agents',
+  list_user_mappings: 'View employee IM channel mappings',
+  get_system_stats: 'Read EC2 CPU / memory / disk stats',
+  list_knowledge_bases: 'List configured knowledge bases',
+};
+
+function AdminAssistantTab() {
+  const { data: cfg } = useAdminAssistant();
+  const update = useUpdateAdminAssistant();
+  const { data: mc } = useModelConfig();
+  const [model, setModel] = useState('');
+  const [commands, setCommands] = useState<string[]>([]);
+  const [extra, setExtra] = useState('');
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    if (cfg) {
+      setModel(cfg.model || '');
+      setCommands(cfg.allowedCommands || []);
+      setExtra(cfg.systemPromptExtra || '');
+    }
+  }, [cfg]);
+
+  const toggleCmd = (c: string) => setCommands(s => s.includes(c) ? s.filter(x => x !== c) : [...s, c]);
+
+  const handleSave = async () => {
+    await update.mutateAsync({ model, allowedCommands: commands, systemPromptExtra: extra });
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  const modelOptions = (mc?.availableModels || [])
+    .filter(m => m.enabled)
+    .map(m => ({ label: `${m.modelName} ($${m.inputRate}/$${m.outputRate})`, value: m.modelId }));
+
+  return (
+    <div className="space-y-6 max-w-2xl">
+      <Card>
+        <h3 className="text-sm font-semibold text-text-primary mb-4 flex items-center gap-2">
+          <MessageSquare size={16} className="text-primary" /> Admin Assistant Model
+        </h3>
+        <p className="text-xs text-text-muted mb-4">
+          The model used by the floating chat assistant (bottom-right corner).
+          Choose a fast, cost-effective model for operational queries.
+        </p>
+        <Select label="Model" value={model} onChange={setModel}
+          options={modelOptions} placeholder="Select model…" />
+      </Card>
+
+      <Card>
+        <h3 className="text-sm font-semibold text-text-primary mb-3 flex items-center gap-2">
+          <MessageSquare size={16} className="text-primary" /> Allowed Tools / Commands
+        </h3>
+        <p className="text-xs text-text-muted mb-4">
+          Select which backend tools the Admin Assistant can call. Restrict to limit what the AI can read or change.
+        </p>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {ALL_COMMANDS.map(c => {
+            const on = commands.includes(c);
+            return (
+              <label key={c}
+                className={`flex items-start gap-2.5 rounded-xl px-3 py-2.5 cursor-pointer transition-colors ${on ? 'bg-primary/10 border border-primary/30' : 'bg-surface-dim border border-transparent hover:border-dark-border/50'}`}>
+                <input type="checkbox" checked={on} onChange={() => toggleCmd(c)} className="accent-primary mt-0.5" />
+                <div>
+                  <p className="text-xs font-medium text-text-primary">{c}</p>
+                  <p className="text-[10px] text-text-muted">{COMMAND_DESCRIPTIONS[c] || ''}</p>
+                </div>
+              </label>
+            );
+          })}
+        </div>
+      </Card>
+
+      <Card>
+        <h3 className="text-sm font-semibold text-text-primary mb-3">Extra System Prompt</h3>
+        <p className="text-xs text-text-muted mb-3">Append additional instructions to the Admin Assistant's system prompt.</p>
+        <textarea
+          value={extra}
+          onChange={e => setExtra(e.target.value)}
+          rows={4}
+          placeholder="e.g. Always respond in English. Never suggest deleting data without explicit confirmation."
+          className="w-full rounded-xl border border-dark-border/60 bg-surface-dim px-4 py-3 text-sm text-text-primary placeholder:text-text-muted focus:border-primary/60 focus:outline-none resize-y"
+        />
+      </Card>
+
+      <Button variant="primary" onClick={handleSave} disabled={update.isPending}>
+        {saved ? <><Check size={14} /> Saved</> : update.isPending ? 'Saving…' : 'Save Changes'}
+      </Button>
+    </div>
+  );
+}
+
+// ─── System Tab ───────────────────────────────────────────────────────────────
+
+function SystemTab() {
+  const { data: stats, isLoading: statsLoading } = useSystemStats();
   const { data: services } = useServiceStatus();
-  const { data: positions = [] } = usePositions();
-  const [activeTab, setActiveTab] = useState('model');
 
-  const mc = modelConfig || { default: { modelId: '', modelName: 'Loading...', inputRate: 0, outputRate: 0 }, fallback: { modelId: '', modelName: '', inputRate: 0, outputRate: 0 }, positionOverrides: {}, availableModels: [] };
-  const sc = securityConfig || { alwaysBlocked: [], piiDetection: { enabled: true, mode: 'redact' }, dataSovereignty: { enabled: true, region: '' }, conversationRetention: { days: 180 }, dockerSandbox: true, fastPathRouting: true, verboseAudit: false };
   const svc = services || { gateway: { status: 'unknown', port: 0, uptime: '', requestsToday: 0 }, auth_agent: { status: 'unknown', uptime: '', approvalsProcessed: 0 }, bedrock: { status: 'unknown', region: '', latencyMs: 0, vpcEndpoint: false }, dynamodb: { status: 'unknown', table: '', itemCount: 0 }, s3: { status: 'unknown', bucket: '' } };
 
   return (
-    <div>
-      <div className="flex items-center justify-between">
-        <PageHeader title="Settings" description="Platform configuration, model selection, security policies, and service health" />
-        <Badge color="info">v1.0.0</Badge>
+    <div className="space-y-6">
+      {/* Resources */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        {/* CPU */}
+        <Card>
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2"><Cpu size={16} className="text-primary" /><span className="text-sm font-semibold">CPU</span></div>
+            {statsLoading ? <RefreshCw size={14} className="animate-spin text-text-muted" /> : null}
+          </div>
+          <p className="text-3xl font-bold text-text-primary mb-2">{stats?.cpu?.pct ?? '—'}<span className="text-sm font-normal text-text-muted ml-1">%</span></p>
+          <ProgressBar pct={stats?.cpu?.pct || 0} />
+        </Card>
+
+        {/* Memory */}
+        <Card>
+          <div className="flex items-center gap-2 mb-3">
+            <MemoryStick size={16} className="text-primary" /><span className="text-sm font-semibold">Memory</span>
+          </div>
+          <p className="text-3xl font-bold text-text-primary mb-1">
+            {stats?.memory?.pct ?? '—'}<span className="text-sm font-normal text-text-muted ml-1">%</span>
+          </p>
+          <ProgressBar pct={stats?.memory?.pct || 0} />
+          <p className="text-xs text-text-muted mt-1.5">
+            {stats?.memory ? `${fmtBytes(stats.memory.used)} / ${fmtBytes(stats.memory.total)}` : '—'}
+          </p>
+        </Card>
+
+        {/* Disk */}
+        <Card>
+          <div className="flex items-center gap-2 mb-3">
+            <HardDrive size={16} className="text-primary" /><span className="text-sm font-semibold">Disk</span>
+          </div>
+          <p className="text-3xl font-bold text-text-primary mb-1">
+            {stats?.disk?.pct ?? '—'}<span className="text-sm font-normal text-text-muted ml-1">%</span>
+          </p>
+          <ProgressBar pct={stats?.disk?.pct || 0} />
+          <p className="text-xs text-text-muted mt-1.5">
+            {stats?.disk ? `${fmtBytes(stats.disk.used)} used · ${fmtBytes(stats.disk.free)} free` : '—'}
+          </p>
+        </Card>
       </div>
+
+      {/* Port Status */}
+      <Card>
+        <h3 className="text-sm font-semibold text-text-primary mb-4 flex items-center gap-2">
+          <Wifi size={16} className="text-primary" /> Port Status
+        </h3>
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          {(stats?.ports || []).map(p => (
+            <div key={p.port} className={`rounded-xl px-4 py-3 border ${p.listening ? 'bg-success/5 border-success/20' : 'bg-danger/5 border-danger/20'}`}>
+              <div className="flex items-center gap-1.5 mb-1">
+                {p.listening ? <Wifi size={13} className="text-success" /> : <WifiOff size={13} className="text-danger" />}
+                <span className="text-xs font-mono font-bold">{p.port}</span>
+              </div>
+              <p className="text-xs text-text-secondary">{p.name}</p>
+              <Badge color={p.listening ? 'success' : 'danger'}>{p.listening ? 'Listening' : 'Down'}</Badge>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      {/* Services */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {[
+          { name: 'Gateway Proxy', status: svc.gateway.status, details: [`Port ${svc.gateway.port}`, `Uptime: ${svc.gateway.uptime}`, `Requests today: ${svc.gateway.requestsToday}`] },
+          { name: 'Auth Agent', status: svc.auth_agent.status, details: [`Uptime: ${svc.auth_agent.uptime}`, `Approvals: ${svc.auth_agent.approvalsProcessed}`] },
+          { name: 'Bedrock', status: svc.bedrock.status, details: [`Region: ${svc.bedrock.region}`, `Latency: ${svc.bedrock.latencyMs}ms`, svc.bedrock.vpcEndpoint ? 'VPC Endpoint ✓' : 'Public endpoint'] },
+          { name: 'DynamoDB', status: svc.dynamodb.status, details: [svc.dynamodb.table, `${svc.dynamodb.itemCount} items`] },
+          { name: 'S3', status: svc.s3.status, details: [svc.s3.bucket] },
+        ].map(s => {
+          const ok = ['running', 'healthy', 'connected', 'active'].includes(s.status);
+          return (
+            <Card key={s.name}>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm font-medium">{s.name}</span>
+                <div className={`h-2.5 w-2.5 rounded-full ${ok ? 'bg-success animate-pulse' : 'bg-warning'}`} />
+              </div>
+              <div className="space-y-0.5">
+                {s.details.map((d, i) => <p key={i} className="text-xs text-text-muted">{d}</p>)}
+              </div>
+            </Card>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+export default function Settings() {
+  const [tab, setTab] = useState('account');
+
+  return (
+    <div>
+      <PageHeader title="Settings" description="Admin account, interface preferences, admin assistant configuration, and system health" />
 
       <Tabs
         tabs={[
-          { id: 'model', label: 'LLM Provider' },
-          { id: 'security', label: 'Security Policy' },
-          { id: 'services', label: 'Service Status' },
+          { id: 'account', label: 'Account' },
+          { id: 'interface', label: 'Interface' },
+          { id: 'assistant', label: 'Admin Assistant' },
+          { id: 'system', label: 'System' },
         ]}
-        activeTab={activeTab}
-        onChange={setActiveTab}
+        activeTab={tab}
+        onChange={setTab}
       />
 
       <div className="mt-6">
-        {activeTab === 'model' && (
-          <div className="space-y-6">
-            {/* Default + Fallback */}
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-              <Card>
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center gap-2"><Cpu size={18} className="text-primary" /><h3 className="text-sm font-semibold">Default Model</h3></div>
-                  <Button variant="default" size="sm" disabled>Change</Button>
-                </div>
-                <div className="rounded-lg bg-dark-bg p-4 space-y-2">
-                  <p className="text-lg font-semibold text-text-primary">{mc.default.modelName}</p>
-                  <p className="text-xs text-text-muted font-mono">{mc.default.modelId}</p>
-                  <div className="flex gap-3 mt-2">
-                    <Badge color="success">Input: ${mc.default.inputRate}/1M</Badge>
-                    <Badge color="success">Output: ${mc.default.outputRate}/1M</Badge>
-                  </div>
-                </div>
-              </Card>
-              <Card>
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center gap-2"><Zap size={18} className="text-warning" /><h3 className="text-sm font-semibold">Fallback Model</h3></div>
-                  <Button variant="default" size="sm" disabled>Change</Button>
-                </div>
-                <div className="rounded-lg bg-dark-bg p-4 space-y-2">
-                  <p className="text-lg font-semibold text-text-primary">{mc.fallback.modelName}</p>
-                  <p className="text-xs text-text-muted font-mono">{mc.fallback.modelId}</p>
-                  <div className="flex gap-3 mt-2">
-                    <Badge color="info">Input: ${mc.fallback.inputRate}/1M</Badge>
-                    <Badge color="info">Output: ${mc.fallback.outputRate}/1M</Badge>
-                  </div>
-                </div>
-              </Card>
-            </div>
-
-            {/* Per-Position Overrides */}
-            <Card>
-              <div className="flex items-center justify-between mb-4">
-                <div>
-                  <h3 className="text-sm font-semibold text-text-primary">Per-Position Model Overrides</h3>
-                  <p className="text-xs text-text-muted">Override the default model for specific positions that need different capabilities</p>
-                </div>
-                <Button variant="default" size="sm" disabled>Add Override</Button>
-              </div>
-              <Table
-                columns={[
-                  { key: 'position', label: 'Position', render: (item: { posId: string; posName: string; modelName: string; modelId: string; inputRate: number; outputRate: number; reason: string }) => (
-                    <span className="font-medium">{item.posName}</span>
-                  )},
-                  { key: 'model', label: 'Model', render: (item: { posId: string; posName: string; modelName: string; modelId: string; inputRate: number; outputRate: number; reason: string }) => (
-                    <div><p className="text-sm">{item.modelName}</p><p className="text-xs text-text-muted font-mono">{item.modelId}</p></div>
-                  )},
-                  { key: 'pricing', label: 'Pricing', render: (item: { posId: string; posName: string; modelName: string; modelId: string; inputRate: number; outputRate: number; reason: string }) => (
-                    <span className="text-xs">${item.inputRate} / ${item.outputRate}</span>
-                  )},
-                  { key: 'reason', label: 'Reason', render: (item: { posId: string; posName: string; modelName: string; modelId: string; inputRate: number; outputRate: number; reason: string }) => (
-                    <span className="text-xs text-text-secondary">{item.reason}</span>
-                  )},
-                  { key: 'actions', label: '', render: () => <Button variant="ghost" size="sm" disabled>Remove</Button> },
-                ]}
-                data={Object.entries(mc.positionOverrides).map(([posId, override]) => ({
-                  posId,
-                  posName: positions.find(p => p.id === posId)?.name || posId,
-                  ...override,
-                }))}
-              />
-            </Card>
-
-            {/* Available Models */}
-            <Card>
-              <h3 className="text-sm font-semibold text-text-primary mb-4">Available Models</h3>
-              <Table
-                columns={[
-                  { key: 'name', label: 'Model', render: (m: typeof mc.availableModels[0]) => (
-                    <div><p className="font-medium">{m.modelName}</p><p className="text-xs text-text-muted font-mono">{m.modelId}</p></div>
-                  )},
-                  { key: 'input', label: 'Input Rate', render: (m: typeof mc.availableModels[0]) => `$${m.inputRate}/1M tokens` },
-                  { key: 'output', label: 'Output Rate', render: (m: typeof mc.availableModels[0]) => `$${m.outputRate}/1M tokens` },
-                  { key: 'status', label: 'Status', render: (m: typeof mc.availableModels[0]) => (
-                    <Badge color={m.enabled ? 'success' : 'default'} dot>{m.enabled ? 'Enabled' : 'Disabled'}</Badge>
-                  )},
-                  { key: 'actions', label: '', render: (m: typeof mc.availableModels[0]) => (
-                    <span className="text-xs text-text-muted">{m.enabled ? 'Active' : 'Inactive'}</span>
-                  )},
-                ]}
-                data={mc.availableModels}
-              />
-            </Card>
-          </div>
-        )}
-
-        {activeTab === 'security' && (
-          <div className="space-y-6">
-            <Card>
-              <div className="flex items-center gap-2 mb-4"><Shield size={18} className="text-danger" /><h3 className="text-sm font-semibold">Always Blocked Tools</h3></div>
-              <div className="flex flex-wrap gap-2">
-                {sc.alwaysBlocked.map(t => <Badge key={t} color="danger">{t}</Badge>)}
-              </div>
-              <p className="mt-2 text-xs text-text-muted">These tools/patterns are blocked for ALL roles regardless of permissions</p>
-            </Card>
-
-            <Card>
-              <h3 className="text-sm font-semibold text-text-primary mb-4">Security Policies</h3>
-              <div className="space-y-4">
-                <div className="flex items-center justify-between rounded-lg bg-dark-bg p-4">
-                  <div>
-                    <p className="text-sm font-medium">PII Detection</p>
-                    <p className="text-xs text-text-muted">Detect and handle personally identifiable information in agent responses</p>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <Badge color={sc.piiDetection.enabled ? 'success' : 'default'}>{sc.piiDetection.enabled ? 'Enabled' : 'Disabled'}</Badge>
-                    <Badge color="info">Mode: {sc.piiDetection.mode}</Badge>
-                  </div>
-                </div>
-                <div className="flex items-center justify-between rounded-lg bg-dark-bg p-4">
-                  <div>
-                    <p className="text-sm font-medium">Data Sovereignty</p>
-                    <p className="text-xs text-text-muted">Ensure all data stays within the configured AWS region</p>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <Badge color={sc.dataSovereignty.enabled ? 'success' : 'default'}>{sc.dataSovereignty.enabled ? 'Enabled' : 'Disabled'}</Badge>
-                    <Badge color="info">Region: {sc.dataSovereignty.region}</Badge>
-                  </div>
-                </div>
-                <div className="flex items-center justify-between rounded-lg bg-dark-bg p-4">
-                  <div>
-                    <p className="text-sm font-medium">Conversation Retention</p>
-                    <p className="text-xs text-text-muted">How long conversation logs are retained before automatic deletion</p>
-                  </div>
-                  <Badge color="info">{sc.conversationRetention.days} days</Badge>
-                </div>
-                <div className="flex items-center justify-between rounded-lg bg-dark-bg p-4">
-                  <div>
-                    <p className="text-sm font-medium">Docker Sandbox</p>
-                    <p className="text-xs text-text-muted">Isolate code_execution tool calls in Docker containers</p>
-                  </div>
-                  <button onClick={() => updateSecurity.mutate({ dockerSandbox: !sc.dockerSandbox })} className="cursor-pointer">
-                    <Badge color={sc.dockerSandbox ? 'success' : 'warning'}>{sc.dockerSandbox ? 'Enabled' : 'Disabled'}</Badge>
-                  </button>
-                </div>
-                <div className="flex items-center justify-between rounded-lg bg-dark-bg p-4">
-                  <div>
-                    <p className="text-sm font-medium">Fast-Path Routing</p>
-                    <p className="text-xs text-text-muted">Skip Plan A evaluation for pre-approved tool+role combinations</p>
-                  </div>
-                  <button onClick={() => updateSecurity.mutate({ fastPathRouting: !sc.fastPathRouting })} className="cursor-pointer">
-                    <Badge color={sc.fastPathRouting ? 'success' : 'default'}>{sc.fastPathRouting ? 'Enabled' : 'Disabled'}</Badge>
-                  </button>
-                </div>
-                <div className="flex items-center justify-between rounded-lg bg-dark-bg p-4">
-                  <div>
-                    <p className="text-sm font-medium">Verbose Audit Logging</p>
-                    <p className="text-xs text-text-muted">Log full request/response payloads (increases storage cost)</p>
-                  </div>
-                  <button onClick={() => updateSecurity.mutate({ verboseAudit: !sc.verboseAudit })} className="cursor-pointer">
-                    <Badge color={sc.verboseAudit ? 'warning' : 'default'}>{sc.verboseAudit ? 'Enabled' : 'Disabled'}</Badge>
-                  </button>
-                </div>
-              </div>
-            </Card>
-          </div>
-        )}
-
-        {activeTab === 'services' && (
-          <div className="space-y-6">
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {[
-                { name: 'Gateway Proxy', icon: <Globe size={18} />, status: svc.gateway.status, details: [`Port: ${svc.gateway.port}`, `Uptime: ${svc.gateway.uptime}`, `Requests today: ${svc.gateway.requestsToday}`] },
-                { name: 'Auth Agent', icon: <Shield size={18} />, status: svc.auth_agent.status, details: [`Uptime: ${svc.auth_agent.uptime}`, `Approvals: ${svc.auth_agent.approvalsProcessed}`] },
-                { name: 'Bedrock', icon: <Cpu size={18} />, status: svc.bedrock.status, details: [`Region: ${svc.bedrock.region}`, `Latency: ${svc.bedrock.latencyMs}ms`, `VPC Endpoint: ${svc.bedrock.vpcEndpoint ? 'Yes' : 'No'}`] },
-                { name: 'DynamoDB', icon: <Database size={18} />, status: svc.dynamodb.status, details: [`Table: ${svc.dynamodb.table}`, `Items: ${svc.dynamodb.itemCount}`] },
-                { name: 'S3', icon: <Cloud size={18} />, status: svc.s3.status, details: [`Bucket: ${svc.s3.bucket}`] },
-              ].map(s => (
-                <Card key={s.name}>
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-2">{s.icon}<h3 className="text-sm font-semibold">{s.name}</h3></div>
-                    <div className={`h-2.5 w-2.5 rounded-full ${s.status === 'running' || s.status === 'healthy' || s.status === 'connected' || s.status === 'active' ? 'bg-success animate-pulse' : 'bg-warning'}`} />
-                  </div>
-                  <div className="space-y-1">
-                    {s.details.map((d, i) => <p key={i} className="text-xs text-text-muted">{d}</p>)}
-                  </div>
-                </Card>
-              ))}
-            </div>
-          </div>
-        )}
+        {tab === 'account' && <AccountTab />}
+        {tab === 'interface' && <InterfaceTab />}
+        {tab === 'assistant' && <AdminAssistantTab />}
+        {tab === 'system' && <SystemTab />}
       </div>
     </div>
   );

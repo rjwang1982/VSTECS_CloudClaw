@@ -1,12 +1,12 @@
 # OpenClaw on AWS with Bedrock
 
-> Your own AI assistant on AWS — connects to WhatsApp, Telegram, Discord, Slack. Powered by Amazon Bedrock. No API keys. One-click deploy. ~$40/month.
+> Your own AI assistant on AWS — connects to WhatsApp, Telegram, Discord, Slack. Powered by Amazon Bedrock. No API keys. One-click deploy. From ~$30/month.
 
 English | [简体中文](README_CN.md)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![AWS](https://img.shields.io/badge/AWS-Bedrock-orange.svg)](https://aws.amazon.com/bedrock/)
-[![CloudFormation](https://img.shields.io/badge/IaC-CloudFormation-blue.svg)](https://aws.amazon.com/cloudformation/)
+[![License](https://img.shields.io/badge/License-MIT--0-yellow?style=for-the-badge)](https://opensource.org/licenses/MIT)
+[![Amazon Bedrock](https://img.shields.io/badge/Powered_by-Amazon_Bedrock-FF9900?style=for-the-badge&logo=amazonaws&logoColor=white)](https://aws.amazon.com/bedrock/)
+[![CloudFormation](https://img.shields.io/badge/IaC-CloudFormation-232F3E?style=for-the-badge&logo=amazonaws&logoColor=white)](https://aws.amazon.com/cloudformation/)
 
 ## Why This Exists
 
@@ -60,7 +60,7 @@ INSTANCE_ID=$(aws cloudformation describe-stacks \
 
 aws ssm start-session \
   --target $INSTANCE_ID \
-  --region us-west-2 \
+  --region YOUR_REGION \
   --document-name AWS-StartPortForwardingSession \
   --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
 
@@ -69,7 +69,7 @@ TOKEN=$(aws ssm get-parameter \
   --name /openclaw/openclaw-bedrock/gateway-token \
   --with-decryption \
   --query Parameter.Value \
-  --output text --region us-west-2)
+  --output text --region YOUR_REGION)
 
 # 4. Open in browser
 echo "http://localhost:18789/?token=$TOKEN"
@@ -187,11 +187,13 @@ Switch models with one CloudFormation parameter — no code changes:
 
 | Component | Cost |
 |-----------|------|
-| EC2 (t4g.medium, Graviton) | $24 |
+| EC2 (c7g.large, Graviton) | $58 |
 | EBS (30GB gp3) | $2.40 |
 | VPC Endpoints (optional) | $22 |
 | Bedrock (Nova 2 Lite, ~100 conv/day) | $5-8 |
-| **Total** | **$31-56** |
+| **Total** | **$65-90** |
+
+> Use `t4g.medium` ($24/mo) to bring total down to ~$31-56 if you don't need the extra CPU headroom.
 
 ### Save Money
 
@@ -217,8 +219,9 @@ Switch models with one CloudFormation parameter — no code changes:
 | Type | Monthly | RAM | Architecture | Use case |
 |------|---------|-----|-------------|----------|
 | t4g.small | $12 | 2GB | Graviton ARM | Personal |
-| **t4g.medium** | **$24** | **4GB** | **Graviton ARM** | **Small teams (default)** |
+| t4g.medium | $24 | 4GB | Graviton ARM | Small teams |
 | t4g.large | $48 | 8GB | Graviton ARM | Medium teams |
+| **c7g.large** | **$58** | **4GB** | **Graviton ARM** | **Balanced performance (default)** |
 | c7g.xlarge | $108 | 8GB | Graviton ARM | High performance |
 | t3.medium | $30 | 4GB | x86 | x86 compatibility |
 
@@ -230,9 +233,9 @@ Switch models with one CloudFormation parameter — no code changes:
 | `InstanceType` | c7g.large | EC2 instance type |
 | `CreateVPCEndpoints` | true | Private networking (+$22/mo) |
 | `EnableSandbox` | true | Docker isolation for code execution |
-| `CreateS3Bucket` | true | S3 bucket for file sharing skill |
-| `InstallS3FilesSkill` | true | Auto-install S3 file sharing |
+| `EnableDataProtection` | false | Retain EBS volume on stack deletion |
 | `KeyPairName` | none | EC2 key pair (optional, for emergency SSH) |
+| `AllowedSSHCIDR` | _(empty)_ | CIDR for SSH access — leave empty to disable |
 
 ---
 
@@ -277,7 +280,7 @@ Telegram/WhatsApp message
 | Cost for 50 users | ~$65-110/month (~$1.30-2.20/person) |
 | vs ChatGPT Plus (50 users) | $1,000/month |
 
-**[→ Full Multi-Tenant Guide](README_AGENTCORE.md)** · **[→ Demo Guide](demo/README.md)** · **[→ Roadmap](ROADMAP.md)**
+**[→ Full Multi-Tenant Guide](README_AGENTCORE.md)** · **[→ Roadmap](ROADMAP.md)**
 
 ### 🏢 Enterprise Digital Workforce Platform — [enterprise/](enterprise/)
 

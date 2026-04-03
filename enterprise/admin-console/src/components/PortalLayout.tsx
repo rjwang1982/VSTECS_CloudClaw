@@ -1,9 +1,10 @@
-import { ReactNode } from 'react';
+import { ReactNode, useEffect, useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { MessageSquare, User, BarChart3, Puzzle, FileText, LogOut, Sun, Moon } from 'lucide-react';
+import { MessageSquare, User, BarChart3, Puzzle, FileText, LogOut, Sun, Moon, Link2 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
-import VSTECSLogo from './VSTECSLogo';
+import { api } from '../api/client';
+import ClawForgeLogo from './ClawForgeLogo';
 import clsx from 'clsx';
 
 const NAV = [
@@ -12,6 +13,7 @@ const NAV = [
   { label: 'My Usage', href: '/portal/usage', icon: <BarChart3 size={20} /> },
   { label: 'My Skills', href: '/portal/skills', icon: <Puzzle size={20} /> },
   { label: 'My Requests', href: '/portal/requests', icon: <FileText size={20} /> },
+  { label: 'Connect IM', href: '/portal/channels', icon: <Link2 size={20} /> },
 ];
 
 export default function PortalLayout({ children }: { children: ReactNode }) {
@@ -19,6 +21,15 @@ export default function PortalLayout({ children }: { children: ReactNode }) {
   const { theme, toggle: toggleTheme } = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
+  const [pendingCount, setPendingCount] = useState(0);
+
+  // Poll for pending requests to show notification badge
+  useEffect(() => {
+    const load = () => api.get<any>('/portal/requests').then(d => setPendingCount(d?.pending?.length || 0)).catch(() => {});
+    load();
+    const t = setInterval(load, 30_000);
+    return () => clearInterval(t);
+  }, []);
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -43,7 +54,12 @@ export default function PortalLayout({ children }: { children: ReactNode }) {
               )}
             >
               {item.icon}
-              <span>{item.label}</span>
+              <span className="flex-1 text-left">{item.label}</span>
+              {item.href === '/portal/requests' && pendingCount > 0 && (
+                <span className="flex h-5 min-w-[20px] items-center justify-center rounded-full bg-warning px-1.5 text-[10px] font-bold text-white">
+                  {pendingCount}
+                </span>
+              )}
             </button>
           ))}
         </nav>

@@ -34,8 +34,9 @@ PROFILES = {
 
 DEFAULT_PROFILE = PROFILES["basic"]
 
-# Always blocked regardless of profile — arbitrary code execution risk
-ALWAYS_BLOCKED_TOOLS = {"install_skill", "load_extension", "eval"}
+# Always blocked for standard agents — arbitrary code execution risk.
+# Exec profile bypasses Plan A entirely so this only applies to non-exec.
+ALWAYS_BLOCKED_TOOLS = {"load_extension", "eval"}
 
 
 class PermissionDeniedError(Exception):
@@ -50,21 +51,41 @@ def _ssm_client():
     return boto3.client("ssm", region_name=os.environ.get("AWS_REGION", "us-east-1"))
 
 
+def _base_tenant_id(tenant_id: str) -> str:
+    """Extract base employee ID from session tenant_id.
+
+    Tenant IDs can be:
+      channel__emp_id__hash  → emp_id   (e.g. tg__emp-wjd__abc123)
+      channel__emp_id        → emp_id   (e.g. port__emp-wjd)
+      emp-wjd                → emp-wjd  (direct)
+    Permissions are stored under base employee ID, not session-specific IDs.
+    """
+    parts = tenant_id.split("__")
+    if len(parts) >= 2:
+        return parts[1]
+    return tenant_id
+
+
 def _permissions_ssm_path(tenant_id: str) -> str:
     return f"/openclaw/{STACK_NAME}/tenants/{tenant_id}/permissions"
 
 
 def read_permission_profile(tenant_id: str) -> dict:
-    """Read tenant's Permission_Profile from SSM. Falls back to basic."""
+    """Read tenant's Permission_Profile from SSM. Falls back to basic.
+
+    Resolves base employee ID from session tenant_id so permissions stored
+    under emp-wjd are found even when called with tg__emp-wjd__HASH.
+    """
+    base_id = _base_tenant_id(tenant_id)
     ssm = _ssm_client()
-    path = _permissions_ssm_path(tenant_id)
+    path = _permissions_ssm_path(base_id)
     try:
         response = ssm.get_parameter(Name=path)
         return json.loads(response["Parameter"]["Value"])
     except ssm.exceptions.ParameterNotFound:
         return dict(DEFAULT_PROFILE)
     except ClientError as e:
-        logger.error("SSM read failed tenant_id=%s error=%s", tenant_id, e)
+        logger.error("SSM read failed tenant_id=%s base_id=%s error=%s", tenant_id, base_id, e)
         raise
 
 

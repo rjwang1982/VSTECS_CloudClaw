@@ -198,6 +198,14 @@ export function useAuditInsights() {
   });
 }
 
+export function useRunAuditScan() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post('/audit/run-scan', {}),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['audit-insights'] }),
+  });
+}
+
 export interface AgentHealthItem {
   agentId: string; agentName: string; employeeName: string; positionName: string;
   status: string; qualityScore: number | null; channels: string[]; skillCount: number;
@@ -280,7 +288,7 @@ export function useModelConfig() {
   return useQuery<{
     default: { modelId: string; modelName: string; inputRate: number; outputRate: number };
     fallback: { modelId: string; modelName: string; inputRate: number; outputRate: number };
-    positionOverrides: Record<string, { modelId: string; modelName: string; inputRate: number; outputRate: number; reason: string }>;
+    positionOverrides: Record<string, any>; employeeOverrides: Record<string, any>;
     availableModels: { modelId: string; modelName: string; inputRate: number; outputRate: number; enabled: boolean }[];
   }>({
     queryKey: ['model-config'],
@@ -300,6 +308,38 @@ export function useSecurityConfig() {
 }
 
 export function useUpdateModelConfig() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: Record<string, any>) => api.put('/settings/model/default', data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['model-config'] }),
+  });
+}
+
+export function useUpdateFallbackModel() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: Record<string, any>) => api.put('/settings/model/fallback', data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['model-config'] }),
+  });
+}
+
+export function useSetPositionModel() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ posId, ...data }: { posId: string } & Record<string, any>) => api.put(`/settings/model/position/${posId}`, data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['model-config'] }),
+  });
+}
+
+export function useRemovePositionModel() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (posId: string) => api.del(`/settings/model/position/${posId}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['model-config'] }),
+  });
+}
+
+export function useEnableModel() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (data: Record<string, any>) => api.put('/settings/model/default', data),
@@ -357,6 +397,15 @@ export function useWorkspaceFile(key: string) {
     queryKey: ['workspace-file', key],
     queryFn: () => api.get(`/workspace/file?key=${encodeURIComponent(key)}`),
     enabled: !!key,
+  });
+}
+
+export function useSaveWorkspaceFile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ key, content }: { key: string; content: string }) =>
+      api.put<{ key: string; saved: boolean }>('/workspace/file', { key, content }),
+    onSuccess: (_, vars) => qc.invalidateQueries({ queryKey: ['workspace-file', vars.key] }),
   });
 }
 
@@ -526,11 +575,336 @@ export function useDeleteUserMapping() {
 export function useApprovePairing() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (data: { channel: string; pairingCode: string; employeeId: string; channelUserId: string }) =>
+    mutationFn: (data: { channel: string; pairingCode: string; employeeId: string; channelUserId: string; pairingUserId?: string }) =>
       api.post<{ approved: boolean; output?: string; error?: string; mappingWritten?: boolean }>('/bindings/pairing-approve', data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['user-mappings'] });
       qc.invalidateQueries({ queryKey: ['audit'] });
     },
+  });
+}
+
+// =========================================================================
+// Security Center
+// =========================================================================
+
+export function useGlobalSoul() {
+  return useQuery<{ content: string; key: string }>({
+    queryKey: ['security-global-soul'],
+    queryFn: () => api.get('/security/global-soul'),
+  });
+}
+
+export function useUpdateGlobalSoul() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (content: string) => api.put('/security/global-soul', { content }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['security-global-soul'] }),
+  });
+}
+
+export function usePositionSoul(posId: string) {
+  return useQuery<{ content: string; key: string }>({
+    queryKey: ['security-position-soul', posId],
+    queryFn: () => api.get(`/security/positions/${posId}/soul`),
+    enabled: !!posId,
+  });
+}
+
+export function useUpdatePositionSoul() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ posId, content }: { posId: string; content: string }) =>
+      api.put(`/security/positions/${posId}/soul`, { content }),
+    onSuccess: (_d, v) => qc.invalidateQueries({ queryKey: ['security-position-soul', v.posId] }),
+  });
+}
+
+export function usePositionTools(posId: string) {
+  return useQuery<{ profile: string; tools: string[] }>({
+    queryKey: ['security-position-tools', posId],
+    queryFn: () => api.get(`/security/positions/${posId}/tools`),
+    enabled: !!posId,
+  });
+}
+
+export function useUpdatePositionTools() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ posId, profile, tools }: { posId: string; profile: string; tools: string[] }) =>
+      api.put(`/security/positions/${posId}/tools`, { profile, tools }),
+    onSuccess: (_d, v) => qc.invalidateQueries({ queryKey: ['security-position-tools', v.posId] }),
+  });
+}
+
+export interface SecurityRuntime {
+  id: string; name: string; status: string;
+  containerUri: string; roleArn: string; model: string;
+  idleTimeoutSec: number; maxLifetimeSec: number;
+  guardrailId?: string; guardrailVersion?: string;
+  createdAt: string; version: string;
+}
+
+export interface Guardrail {
+  id: string; name: string; status: string; version: string; updatedAt: string;
+}
+
+export interface GuardrailEvent {
+  id: string; timestamp: string; actorName: string; actorId: string;
+  guardrailId: string; guardrailVersion: string; guardrailSource: string;
+  guardrailPolicy: string; detail: string; status: string;
+}
+
+export function useSecurityRuntimes() {
+  return useQuery<{ runtimes: SecurityRuntime[]; error?: string }>({
+    queryKey: ['security-runtimes'],
+    queryFn: () => api.get('/security/runtimes'),
+    staleTime: 30_000,
+  });
+}
+
+export function useUpdateRuntimeLifecycle() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ runtimeId, idleTimeoutSec, maxLifetimeSec }: { runtimeId: string; idleTimeoutSec: number; maxLifetimeSec: number }) =>
+      api.put(`/security/runtimes/${runtimeId}/lifecycle`, { idleTimeoutSec, maxLifetimeSec }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['security-runtimes'] }),
+  });
+}
+
+export function useInfrastructure() {
+  return useQuery<{ iamRoles: any[]; ecrImages: any[]; securityGroups: any[]; vpcs: any[]; subnets: any[] }>({
+    queryKey: ['security-infrastructure'],
+    queryFn: () => api.get('/security/infrastructure'),
+    staleTime: 60_000,
+  });
+}
+
+// =========================================================================
+// Settings — Admin Account, Admin Assistant, System Stats
+// =========================================================================
+
+export function useChangeAdminPassword() {
+  return useMutation({
+    mutationFn: (newPassword: string) => api.put('/settings/admin-password', { newPassword }),
+  });
+}
+
+export function useAdminAssistant() {
+  return useQuery<{ model: string; allowedCommands: string[]; systemPromptExtra: string }>({
+    queryKey: ['admin-assistant-config'],
+    queryFn: () => api.get('/settings/admin-assistant'),
+  });
+}
+
+export function useUpdateAdminAssistant() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { model: string; allowedCommands: string[]; systemPromptExtra: string }) =>
+      api.put('/settings/admin-assistant', data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin-assistant-config'] }),
+  });
+}
+
+export function useSystemStats() {
+  return useQuery<{
+    cpu: { pct: number };
+    memory: { total: number; used: number; free: number; pct: number };
+    disk: { total: number; used: number; free: number; pct: number };
+    ports: { port: number; name: string; listening: boolean }[];
+  }>({
+    queryKey: ['system-stats'],
+    queryFn: () => api.get('/settings/system-stats'),
+    refetchInterval: 10_000,
+  });
+}
+
+// ── Fine-grained security resource hooks ─────────────────────────────────────
+
+export interface EcrImage {
+  uri: string; repo: string; tag: string;
+  digest: string; sizeBytes: number; pushedAt: string;
+}
+
+export function useEcrImages() {
+  return useQuery<{ images: EcrImage[]; error?: string }>({
+    queryKey: ['ecr-images'],
+    queryFn: () => api.get('/security/ecr-images'),
+    staleTime: 60_000,
+  });
+}
+
+export interface IamRole {
+  name: string; arn: string; relevant: boolean; created: string;
+}
+
+export function useIamRoles() {
+  return useQuery<{ roles: IamRole[]; error?: string }>({
+    queryKey: ['iam-roles'],
+    queryFn: () => api.get('/security/iam-roles'),
+    staleTime: 120_000,
+  });
+}
+
+export interface VpcResource {
+  vpcs: { id: string; name: string; cidr: string; isDefault: boolean }[];
+  subnets: { id: string; name: string; vpcId: string; az: string; cidr: string; public: boolean }[];
+  securityGroups: { id: string; name: string; description: string; vpcId: string; relevant: boolean }[];
+}
+
+export function useVpcResources() {
+  return useQuery<VpcResource>({
+    queryKey: ['vpc-resources'],
+    queryFn: () => api.get('/security/vpc-resources'),
+    staleTime: 120_000,
+  });
+}
+
+export function useUpdateRuntimeConfig() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: {
+      runtimeId: string; containerUri?: string; roleArn?: string;
+      networkMode?: string; securityGroupIds?: string[]; subnetIds?: string[];
+      modelId?: string; idleTimeoutSec?: number; maxLifetimeSec?: number;
+      guardrailId?: string; guardrailVersion?: string;
+    }) => api.put(`/security/runtimes/${data.runtimeId}/config`, data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['security-runtimes'] }),
+  });
+}
+
+export function useGuardrails() {
+  return useQuery<{ guardrails: Guardrail[]; error?: string }>({
+    queryKey: ['guardrails'],
+    queryFn: () => api.get('/security/guardrails'),
+    staleTime: 60_000,
+  });
+}
+
+export function useGuardrailEvents(limit = 50) {
+  return useQuery<{ events: GuardrailEvent[]; error?: string }>({
+    queryKey: ['guardrail-events', limit],
+    queryFn: () => api.get(`/audit/guardrail-events?limit=${limit}`),
+    staleTime: 15_000,
+    refetchInterval: 30_000,
+  });
+}
+
+export function useCreateRuntime() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: {
+      name: string; containerUri: string; roleArn: string;
+      networkMode: string; securityGroupIds: string[]; subnetIds: string[];
+      modelId: string; idleTimeoutSec: number; maxLifetimeSec: number;
+    }) => api.post('/security/runtimes/create', data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['security-runtimes'] }),
+  });
+}
+
+// ── Position → Runtime mapping ────────────────────────────────────────────────
+
+export function usePositionRuntimeMap() {
+  return useQuery<{ map: Record<string, string> }>({
+    queryKey: ['position-runtime-map'],
+    queryFn: () => api.get('/security/position-runtime-map'),
+    staleTime: 30_000,
+  });
+}
+
+export function useSetPositionRuntime() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ posId, runtimeId }: { posId: string; runtimeId: string }) =>
+      api.put(`/security/positions/${posId}/runtime`, { runtimeId }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['position-runtime-map'] });
+      qc.invalidateQueries({ queryKey: ['security-runtimes'] });
+    },
+  });
+}
+
+export function useDeletePositionRuntime() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (posId: string) => api.del(`/security/positions/${posId}/runtime`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['position-runtime-map'] }),
+  });
+}
+
+// ── Employee model override ────────────────────────────────────────────────────
+
+export function useSetEmployeeModel() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ empId, modelId, modelName, inputRate, outputRate, reason }: {
+      empId: string; modelId: string; modelName: string;
+      inputRate: number; outputRate: number; reason?: string;
+    }) => api.put(`/settings/model/employee/${empId}`, { modelId, modelName, inputRate, outputRate, reason }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['model-config'] }),
+  });
+}
+
+export function useRemoveEmployeeModel() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (empId: string) => api.del(`/settings/model/employee/${empId}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['model-config'] }),
+  });
+}
+
+// ── Agent config (compaction, context, language) ───────────────────────────────
+
+export function useAgentConfig() {
+  return useQuery<{ positionConfig: Record<string, any>; employeeConfig: Record<string, any> }>({
+    queryKey: ['agent-config'],
+    queryFn: () => api.get('/settings/agent-config'),
+    staleTime: 30_000,
+  });
+}
+
+export function useSetPositionAgentConfig() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ posId, config }: { posId: string; config: Record<string, any> }) =>
+      api.put(`/settings/agent-config/position/${posId}`, config),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['agent-config'] }),
+  });
+}
+
+export function useSetEmployeeAgentConfig() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ empId, config }: { empId: string; config: Record<string, any> }) =>
+      api.put(`/settings/agent-config/employee/${empId}`, config),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['agent-config'] }),
+  });
+}
+
+// ── KB Assignments ─────────────────────────────────────────────────────────────
+
+export function useKBAssignments() {
+  return useQuery<{ positionKBs: Record<string, string[]>; employeeKBs: Record<string, string[]> }>({
+    queryKey: ['kb-assignments'],
+    queryFn: () => api.get('/settings/kb-assignments'),
+    staleTime: 30_000,
+  });
+}
+
+export function useSetPositionKBs() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ posId, kbIds }: { posId: string; kbIds: string[] }) =>
+      api.put(`/settings/kb-assignments/position/${posId}`, { kbIds }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['kb-assignments'] }),
+  });
+}
+
+export function useSetEmployeeKBs() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ empId, kbIds }: { empId: string; kbIds: string[] }) =>
+      api.put(`/settings/kb-assignments/employee/${empId}`, { kbIds }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['kb-assignments'] }),
   });
 }

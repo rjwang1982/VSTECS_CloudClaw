@@ -1,9 +1,9 @@
 import { useState } from 'react';
 import Chart from 'react-apexcharts';
 import type { ApexOptions } from 'apexcharts';
-import { DollarSign, TrendingUp, TrendingDown, Users, Bot, AlertTriangle, Download, Calendar } from 'lucide-react';
-import { Card, StatCard, Badge, Button, PageHeader, Table, Tabs } from '../components/ui';
-import { useUsageSummary, useUsageByDepartment, useUsageByAgent, useUsageBudgets, useUsageTrend, useUsageByModel } from '../hooks/useApi';
+import { DollarSign, TrendingUp, TrendingDown, Users, Bot, AlertTriangle, Download, Calendar, Info, Cpu, Plus } from 'lucide-react';
+import { Card, StatCard, Badge, Button, PageHeader, Table, Tabs, Select, Modal } from '../components/ui';
+import { useUsageSummary, useUsageByDepartment, useUsageByAgent, useUsageBudgets, useUsageTrend, useUsageByModel, useModelConfig, useUpdateModelConfig, useUpdateFallbackModel, usePositions, useAgentConfig, useKBAssignments } from '../hooks/useApi';
 
 const costTrendOpts: ApexOptions = {
   chart: { type: 'area', toolbar: { show: false }, background: 'transparent' },
@@ -11,7 +11,7 @@ const costTrendOpts: ApexOptions = {
   stroke: { curve: 'smooth', width: 2 },
   fill: { type: 'gradient', gradient: { opacityFrom: 0.3, opacityTo: 0.05 } },
   grid: { borderColor: '#2e3039', strokeDashArray: 4 },
-  xaxis: { categories: ['Mar 14', 'Mar 15', 'Mar 16', 'Mar 17', 'Mar 18', 'Mar 19', 'Mar 20'], labels: { style: { colors: '#64748b', fontSize: '12px' } }, axisBorder: { show: false }, axisTicks: { show: false } },
+  xaxis: { labels: { style: { colors: '#64748b', fontSize: '12px' } }, axisBorder: { show: false }, axisTicks: { show: false } },
   yaxis: { labels: { style: { colors: '#64748b', fontSize: '12px' }, formatter: (v: number) => `$${v.toFixed(2)}` } },
   tooltip: { theme: 'dark' },
   legend: { position: 'top', horizontalAlign: 'right', labels: { colors: '#94a3b8' } },
@@ -25,22 +25,56 @@ export default function Usage() {
   const { data: byModel = [] } = useUsageByModel();
   const { data: budgets = [] } = useUsageBudgets();
   const { data: trend = [] } = useUsageTrend();
+  const { data: mc } = useModelConfig();
+  const { data: positions = [] } = usePositions();
+  const { data: agentCfgData } = useAgentConfig();
+  const { data: kbAssignData } = useKBAssignments();
+  const updateDefault = useUpdateModelConfig();
+  const updateFallback = useUpdateFallbackModel();
   const [activeTab, setActiveTab] = useState('department');
   const [timeRange, setTimeRange] = useState('7d');
+  const [modelModal, setModelModal] = useState<'default' | 'fallback' | null>(null);
+  const [selectedModelId, setSelectedModelId] = useState('');
 
   const s = summary || { totalInputTokens: 0, totalOutputTokens: 0, totalCost: 0, totalRequests: 0, tenantCount: 0, chatgptEquivalent: 5 };
+  const m = mc || { default: { modelId: '', modelName: '—', inputRate: 0, outputRate: 0 }, fallback: { modelId: '', modelName: '', inputRate: 0, outputRate: 0 }, positionOverrides: {}, employeeOverrides: {}, availableModels: [] };
+  const agentCfg = agentCfgData || { positionConfig: {}, employeeConfig: {} };
+  const modelOptions = m.availableModels.map((mo: any) => ({ label: `${mo.modelName}  ($${mo.inputRate} in / $${mo.outputRate} out per 1M tokens)`, value: mo.modelId }));
+  const findModel = (id: string) => m.availableModels.find((mo: any) => mo.modelId === id);
+  const handleModelSave = () => {
+    const model = findModel(selectedModelId); if (!model) return;
+    if (modelModal === 'default') updateDefault.mutate({ modelId: model.modelId, modelName: model.modelName, inputRate: model.inputRate, outputRate: model.outputRate });
+    else if (modelModal === 'fallback') updateFallback.mutate({ modelId: model.modelId, modelName: model.modelName, inputRate: model.inputRate, outputRate: model.outputRate });
+    setModelModal(null); setSelectedModelId('');
+  };
 
-  const deptBarOpts: ApexOptions = {
+  const buildDeptBarOpts = (depts: typeof byDept): ApexOptions => ({
     chart: { type: 'bar', toolbar: { show: false }, background: 'transparent', stacked: true },
     colors: ['#6366f1', '#22c55e'],
-    plotOptions: { bar: { borderRadius: 4, columnWidth: '50%', horizontal: true } },
-    grid: { borderColor: '#2e3039', strokeDashArray: 4 },
-    xaxis: { labels: { style: { colors: '#64748b', fontSize: '11px' }, formatter: (v: string) => `${(Number(v) / 1000).toFixed(0)}k` }, axisBorder: { show: false }, axisTicks: { show: false } },
-    yaxis: { labels: { style: { colors: '#94a3b8', fontSize: '12px' } } },
-    tooltip: { theme: 'dark' },
+    plotOptions: { bar: { borderRadius: 3, barHeight: '60%', horizontal: true } },
+    grid: { borderColor: '#2e3039', strokeDashArray: 4, padding: { left: 10 } },
+    xaxis: {
+      categories: depts.map(d => d.department),   // ← department names on y-axis
+      labels: { style: { colors: '#64748b', fontSize: '11px' }, formatter: (v: string) => `${(Number(v) / 1000).toFixed(0)}k` },
+      axisBorder: { show: false }, axisTicks: { show: false },
+    },
+    yaxis: { labels: { style: { colors: '#94a3b8', fontSize: '12px' }, maxWidth: 130 } },
+    tooltip: {
+      theme: 'dark',
+      custom: ({ seriesIndex, dataPointIndex }: { seriesIndex: number; dataPointIndex: number }) => {
+        const d = depts[dataPointIndex];
+        if (!d) return '';
+        return `<div class="p-2 text-xs bg-dark-card border border-dark-border rounded-lg shadow-lg">
+          <p class="font-semibold mb-1">${d.department}</p>
+          <p>Input: ${(d.inputTokens/1000).toFixed(1)}k tokens</p>
+          <p>Output: ${(d.outputTokens/1000).toFixed(1)}k tokens</p>
+          <p class="text-green-400 mt-1">Cost: $${d.cost.toFixed(2)}</p>
+        </div>`;
+      },
+    },
     legend: { position: 'top', horizontalAlign: 'right', labels: { colors: '#94a3b8' } },
     dataLabels: { enabled: false },
-  };
+  });
 
   return (
     <div>
@@ -107,6 +141,7 @@ export default function Usage() {
             { id: 'department', label: 'By Department', count: byDept.length },
             { id: 'agent', label: 'By Agent', count: byAgent.length },
             { id: 'model', label: 'By Model' },
+            { id: 'pricing', label: 'Models & Pricing' },
             { id: 'budget', label: 'Budget Management', count: budgets.filter(b => b.status !== 'ok').length || undefined },
           ]}
           activeTab={activeTab}
@@ -115,32 +150,52 @@ export default function Usage() {
 
         <div className="mt-4">
           {activeTab === 'department' && (
-            <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-              <div>
-                <Chart
-                  options={{...deptBarOpts, yaxis: { labels: { style: { colors: '#94a3b8', fontSize: '12px' } } }}}
-                  series={[
-                    { name: 'Input Tokens', data: byDept.map(d => d.inputTokens) },
-                    { name: 'Output Tokens', data: byDept.map(d => d.outputTokens) },
-                  ]}
-                  type="bar" height={byDept.length * 50 + 60}
-                  categories={byDept.map(d => d.department)}
-                />
-              </div>
-              <Table
-                columns={[
-                  { key: 'dept', label: 'Department', render: (d: typeof byDept[0]) => <span className="font-medium">{d.department}</span> },
-                  { key: 'agents', label: 'Agents', render: (d: typeof byDept[0]) => d.agents },
-                  { key: 'requests', label: 'Requests', render: (d: typeof byDept[0]) => d.requests },
-                  { key: 'tokens', label: 'Tokens', render: (d: typeof byDept[0]) => `${((d.inputTokens + d.outputTokens) / 1000).toFixed(0)}k` },
-                  { key: 'cost', label: 'Cost', render: (d: typeof byDept[0]) => `$${d.cost.toFixed(2)}` },
-                  { key: 'share', label: 'Share', render: (d: typeof byDept[0]) => {
-                    const pct = s.totalCost > 0 ? (d.cost / s.totalCost * 100).toFixed(0) : '0';
-                    return <Badge color="info">{pct}%</Badge>;
-                  }},
+            <div className="space-y-6">
+              {/* Full-width chart — department names now visible on y-axis */}
+              <Chart
+                options={buildDeptBarOpts(byDept)}
+                series={[
+                  { name: 'Input Tokens', data: byDept.map(d => d.inputTokens) },
+                  { name: 'Output Tokens', data: byDept.map(d => d.outputTokens) },
                 ]}
-                data={byDept}
+                type="bar" height={Math.max(byDept.length * 44 + 80, 300)}
               />
+              {/* Table with inline cost share bar — visual without needing the chart */}
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-dark-border text-left">
+                    <th className="pb-2 text-xs font-medium text-text-muted uppercase tracking-wider">Department</th>
+                    <th className="pb-2 text-xs font-medium text-text-muted uppercase tracking-wider text-right">Agents</th>
+                    <th className="pb-2 text-xs font-medium text-text-muted uppercase tracking-wider text-right">Requests</th>
+                    <th className="pb-2 text-xs font-medium text-text-muted uppercase tracking-wider text-right">Tokens</th>
+                    <th className="pb-2 text-xs font-medium text-text-muted uppercase tracking-wider text-right">Cost</th>
+                    <th className="pb-2 text-xs font-medium text-text-muted uppercase tracking-wider w-36">Share</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {byDept.map((d, i) => {
+                    const pct = s.totalCost > 0 ? (d.cost / s.totalCost * 100) : 0;
+                    const maxCost = byDept[0]?.cost || 1;
+                    return (
+                      <tr key={d.department} className="border-b border-dark-border/40 hover:bg-dark-hover transition-colors">
+                        <td className="py-2.5 font-medium text-text-primary">{d.department}</td>
+                        <td className="py-2.5 text-right text-text-secondary">{d.agents}</td>
+                        <td className="py-2.5 text-right text-text-secondary">{d.requests}</td>
+                        <td className="py-2.5 text-right text-text-secondary">{((d.inputTokens + d.outputTokens) / 1000).toFixed(0)}k</td>
+                        <td className="py-2.5 text-right font-medium text-text-primary">${d.cost.toFixed(2)}</td>
+                        <td className="py-2.5">
+                          <div className="flex items-center gap-2">
+                            <div className="flex-1 h-1.5 rounded-full bg-dark-bg overflow-hidden">
+                              <div className="h-full rounded-full bg-primary/70" style={{ width: `${(d.cost / maxCost) * 100}%` }} />
+                            </div>
+                            <span className="text-xs text-text-muted w-8 text-right">{pct.toFixed(0)}%</span>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           )}
 
@@ -232,6 +287,12 @@ export default function Usage() {
 
           {activeTab === 'budget' && (
             <div>
+              <div className="rounded-xl bg-warning/10 border border-warning/30 px-4 py-3 mb-4 flex items-start gap-2">
+                <AlertTriangle size={15} className="text-warning mt-0.5 shrink-0" />
+                <p className="text-xs text-warning">
+                  <strong>Tracking only — budgets are not enforced.</strong> Agents will not be paused or restricted when a budget is exceeded. These figures are for monitoring and planning only.
+                </p>
+              </div>
               <p className="text-sm text-text-secondary mb-4">Monthly budget tracking by department. Projected cost based on current daily usage × 30 days.</p>
               <Table
                 columns={[
@@ -263,8 +324,110 @@ export default function Usage() {
               </div>
             </div>
           )}
+          {/* ── Models & Pricing ── */}
+          {activeTab === 'pricing' && (
+            <div className="space-y-6">
+              {/* Current default + actual spend */}
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                {[
+                  { label: 'Default Model', model: m.default, action: () => { setModelModal('default'); setSelectedModelId(m.default.modelId); }, badge: 'primary' as const },
+                  { label: 'Fallback Model', model: m.fallback, action: () => { setModelModal('fallback'); setSelectedModelId(m.fallback.modelId); }, badge: 'warning' as const },
+                ].map(r => (
+                  <Card key={r.label}>
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="text-sm font-semibold text-text-primary flex items-center gap-2"><Cpu size={15} className="text-primary" />{r.label}</h3>
+                      <Button variant="default" size="sm" onClick={r.action}>Change</Button>
+                    </div>
+                    <div className="rounded-xl bg-surface-dim p-3 space-y-1.5">
+                      <p className="text-base font-semibold text-text-primary">{r.model.modelName || '—'}</p>
+                      <p className="text-[10px] font-mono text-text-muted">{r.model.modelId}</p>
+                      <div className="flex gap-2">
+                        <Badge color={r.badge}>In: ${r.model.inputRate}/1M tokens</Badge>
+                        <Badge color={r.badge}>Out: ${r.model.outputRate}/1M tokens</Badge>
+                      </div>
+                    </div>
+                  </Card>
+                ))}
+              </div>
+
+              {/* Per-position/employee overrides — managed in Agent Factory > Configuration */}
+              <div className="rounded-xl border border-dark-border/40 bg-surface-dim px-4 py-3 flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-text-primary">Per-Position & Per-Employee Model Overrides</p>
+                  <p className="text-xs text-text-muted">Configure in Agent Factory → Configuration tab</p>
+                </div>
+                <Badge color="info">{Object.keys({...m.positionOverrides,...(m.employeeOverrides||{})}).length} overrides active</Badge>
+              </div>
+
+              {/* All available models as a pricing card */}
+              <Card>
+                <h3 className="text-sm font-semibold text-text-primary mb-1">Available Models — Unit Pricing</h3>
+                <p className="text-xs text-text-muted mb-4">Prices per 1 million tokens. Switch default model from the cards above.</p>
+                <div className="space-y-2">
+                  {m.availableModels.map((mo: any) => {
+                    const isDefault = mo.modelId === m.default.modelId;
+                    const isFallback = mo.modelId === m.fallback.modelId;
+                    // Find actual spend for this model from byModel data
+                    const modelSpend = byModel.find(bm => bm.model?.includes(mo.modelId?.split('/').pop()?.split(':')[0] || '??'));
+                    return (
+                      <div key={mo.modelId} className={`flex items-center gap-4 rounded-xl px-4 py-3 ${isDefault ? 'bg-primary/5 border border-primary/20' : isFallback ? 'bg-warning/5 border border-warning/20' : 'bg-surface-dim'}`}>
+                        <div className={`w-2 h-2 rounded-full shrink-0 ${mo.enabled ? 'bg-success' : 'bg-text-muted'}`} />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-text-primary">{mo.modelName}</p>
+                          <p className="text-[10px] font-mono text-text-muted">{mo.modelId}</p>
+                        </div>
+                        <div className="text-right shrink-0 space-y-0.5">
+                          <p className="text-xs text-text-muted">${mo.inputRate} in · ${mo.outputRate} out <span className="text-text-muted/60">per 1M</span></p>
+                          {modelSpend && <p className="text-xs text-success font-medium">${modelSpend.cost?.toFixed(4)} spent · {(modelSpend.inputTokens+modelSpend.outputTokens)/1000}k tokens</p>}
+                        </div>
+                        {isDefault && <Badge color="primary">Default</Badge>}
+                        {isFallback && <Badge color="warning">Fallback</Badge>}
+                        {!isDefault && !isFallback && mo.enabled && (
+                          <Button variant="ghost" size="sm" onClick={() => updateDefault.mutate({ modelId: mo.modelId, modelName: mo.modelName, inputRate: mo.inputRate, outputRate: mo.outputRate })}>Set Default</Button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </Card>
+
+              {/* Memory & Context — now in Agent Factory */}
+              <div className="rounded-xl border border-dark-border/40 bg-surface-dim px-4 py-3 flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-text-primary">Memory & Context Settings</p>
+                  <p className="text-xs text-text-muted">Configure in Agent Factory → Configuration tab</p>
+                </div>
+                <Badge color="info">{Object.keys(agentCfg.positionConfig || {}).length} positions configured</Badge>
+              </div>
+
+              {/* KB Assignments — now in Knowledge Base */}
+              <div className="rounded-xl border border-dark-border/40 bg-surface-dim px-4 py-3 flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-text-primary">Knowledge Base Assignments</p>
+                  <p className="text-xs text-text-muted">Configure in Knowledge Base → Assignments tab</p>
+                </div>
+                <Badge color="info">{Object.keys((kbAssignData?.positionKBs || {})).length} positions assigned</Badge>
+              </div>
+
+              <div className="rounded-xl bg-info/5 border border-info/20 px-4 py-3 text-xs text-info">
+                Model changes take effect on the next agent cold start (~15 min idle timeout). Actual Bedrock billing may differ slightly from estimated costs.
+              </div>
+            </div>
+          )}
         </div>
       </Card>
+
+      {/* Model change modal — default/fallback only; overrides are in Agent Factory */}
+      {modelModal && (
+        <Modal open={true} onClose={() => setModelModal(null)}
+          title={modelModal === 'default' ? 'Change Default Model' : 'Change Fallback Model'}
+          footer={<div className="flex justify-end gap-3"><Button variant="default" onClick={() => setModelModal(null)}>Cancel</Button><Button variant="primary" onClick={handleModelSave}>Apply</Button></div>}>
+          <div className="space-y-4">
+            <Select label="Model" value={selectedModelId} onChange={setSelectedModelId} options={modelOptions} placeholder="Select model..." />
+          </div>
+        </Modal>
+      )}
+
     </div>
   );
 }

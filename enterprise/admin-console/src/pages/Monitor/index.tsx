@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState, useEffect } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import Chart from 'react-apexcharts';
 import type { ApexOptions } from 'apexcharts';
 import { Bot, MessageSquare, Star, AlertTriangle, Shield, RefreshCw, Eye, Radio, Clock, Zap } from 'lucide-react';
@@ -26,20 +26,56 @@ export default function Monitor() {
   const { data: sessions = [], refetch: refetchSessions } = useSessions();
   const { data: AGENTS = [] } = useAgents();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { data: healthData, refetch: refetchHealth } = useMonitorHealth();
   const { data: alertRules = [], refetch: refetchAlerts } = useAlertRules();
   const { data: runtimeData } = useRuntimeEvents(60);
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState('sessions');
 
+  // Deep-link: ?session=<id> from Agent Detail → pre-select that session
+  useEffect(() => {
+    const sid = searchParams.get('session');
+    if (sid) setSelectedSession(sid);
+  }, [searchParams]);
+
   const health = healthData?.agents || [];
   const sys = healthData?.system || {};
-  const activeAgents = AGENTS.filter(a => a.status === 'active').length;
+  // Use CloudWatch active tenants for "online agents" — reflects real running microVMs
+  const activeAgents = (runtimeData as any)?.summary?.activeTenants ?? AGENTS.filter(a => a.status === 'active').length;
   const totalTurns = sessions.reduce((s, sess) => s + sess.turns, 0);
   const avgQuality = AGENTS.filter(a => a.qualityScore).length > 0
     ? AGENTS.filter(a => a.qualityScore).reduce((s, a) => s + (a.qualityScore || 0), 0) / AGENTS.filter(a => a.qualityScore).length
     : 0;
   const alertCount = alertRules.filter(a => a.status === 'warning').length;
+
+  // Build activity chart from CloudWatch runtime events — 60-minute window, 6×10-min buckets
+  const buildChartSeries = () => {
+    const events = (runtimeData as any)?.events || [];
+    if (events.length === 0) return null;
+    const now = Date.now();
+    // 6 buckets of 10 minutes = last 60 minutes
+    const buckets = [5, 4, 3, 2, 1, 0].map(i => {
+      const start = now - (i + 1) * 10 * 60000;
+      const end   = now - i * 10 * 60000;
+      const inBucket = events.filter((e: any) => {
+        const t = new Date(e.timestamp).getTime();
+        return t >= start && t < end;
+      });
+      return {
+        invocations: inBucket.filter((e: any) => e.type === 'invocation').length,
+        toolCalls:   inBucket.filter((e: any) => e.type === 'usage').length,
+        planA:       inBucket.filter((e: any) => e.type === 'plan_a').length,
+      };
+    });
+    // Return null only if every bucket is completely empty
+    const hasAny = buckets.some(b => b.invocations + b.toolCalls + b.planA > 0);
+    return hasAny ? buckets : null;
+  };
+  const chartBuckets = buildChartSeries();
+
+  // x-axis labels for the 60-min chart
+  const chartXLabels = ['50m', '40m', '30m', '20m', '10m', 'now'];
 
   const elapsed = (startedAt: string) => {
     const mins = Math.floor((Date.now() - new Date(startedAt).getTime()) / 60000);
@@ -58,10 +94,10 @@ export default function Monitor() {
       {/* Top KPIs */}
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6 mb-6">
         <StatCard title="Live Sessions" value={sessions.length} icon={<Radio size={22} />} color="success" />
-        <StatCard title="Online Agents" value={activeAgents} icon={<Bot size={22} />} color="primary" />
+        <StatCard title="Active microVMs" value={activeAgents} icon={<Bot size={22} />} color="primary" />
         <StatCard title="Total Turns" value={totalTurns} icon={<MessageSquare size={22} />} color="info" />
-        <StatCard title="Avg Quality" value={avgQuality.toFixed(1)} icon={<Star size={22} />} color="warning" />
-        <StatCard title="P95 Response" value={`${sys.p95ResponseSec || 4.2}s`} icon={<Clock size={22} />} color="cyan" />
+        <StatCard title="Avg Quality" value={avgQuality > 0 ? avgQuality.toFixed(1) : '—'} icon={<Star size={22} />} color="warning" />
+        <StatCard title="P95 Response" value={sys.p95ResponseSec ? `${sys.p95ResponseSec}s` : '—'} icon={<Clock size={22} />} color="cyan" />
         <StatCard title="Alerts" value={alertCount} icon={<AlertTriangle size={22} />} color={alertCount > 0 ? 'danger' : 'success'} />
       </div>
 
@@ -89,16 +125,28 @@ export default function Monitor() {
       <Card className="mb-6">
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h3 className="text-lg font-semibold text-text-primary">Real-time Activity</h3>
-            <p className="text-sm text-text-secondary">Messages, tool calls, and permission checks per minute</p>
+            <h3 className="text-lg font-semibold text-text-primary">Agent Activity (Last 60 Minutes)</h3>
+            <p className="text-sm text-text-secondary">
+              {chartBuckets ? 'Invocations per 10-min window — from CloudWatch Logs' : 'No microVM activity in the last 60 minutes'}
+            </p>
           </div>
           <Button variant="ghost" size="sm" onClick={() => { refetchSessions(); refetchHealth(); refetchAlerts(); }}><RefreshCw size={14} /> Refresh</Button>
         </div>
-        <Chart options={realtimeOpts} series={[
-          { name: 'Messages', data: sessions.length > 0 ? [sessions.length - 2, sessions.length, sessions.length - 1, sessions.length + 1, sessions.length - 1, sessions.length].map(v => Math.max(0, v)) : [] },
-          { name: 'Tool Calls', data: sessions.length > 0 ? sessions.slice(0, 6).map(s => (s as any).toolCalls || 0) : [] },
-          { name: 'Permission Checks', data: sessions.length > 0 ? [1, 1, 0, 2, 1, 1].slice(0, Math.min(6, sessions.length)) : [] },
-        ]} type="area" height={220} />
+        {chartBuckets ? (
+          <Chart
+            options={{ ...realtimeOpts, xaxis: { ...realtimeOpts.xaxis, categories: chartXLabels } }}
+            series={[
+              { name: 'Invocations', data: chartBuckets.map(b => b.invocations) },
+              { name: 'Usage Events', data: chartBuckets.map(b => b.toolCalls) },
+              { name: 'Plan A Checks', data: chartBuckets.map(b => b.planA) },
+            ]} type="area" height={220} />
+        ) : (
+          <div className="flex flex-col items-center justify-center h-[220px] text-text-muted">
+            <Radio size={32} className="mb-3 opacity-30" />
+            <p className="text-sm">No runtime events to display</p>
+            <p className="text-xs mt-1">Activity appears here when employees send messages via Discord, Telegram, or Portal</p>
+          </div>
+        )}
       </Card>
 
       {/* Tabbed Content */}
