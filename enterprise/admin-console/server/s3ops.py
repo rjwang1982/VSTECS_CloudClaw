@@ -25,11 +25,16 @@ def _client():
 def bucket():
     global _bucket
     if _bucket is None:
-        try:
-            account = boto3.client("sts", region_name=AWS_REGION).get_caller_identity()["Account"]
-            _bucket = f"openclaw-tenants-{account}"
-        except Exception:
-            _bucket = "openclaw-tenants-000000000000"
+        # Prefer S3_BUCKET env var (set by CloudFormation), fallback to convention
+        env_bucket = os.environ.get("S3_BUCKET", "")
+        if env_bucket:
+            _bucket = env_bucket
+        else:
+            try:
+                account = boto3.client("sts", region_name=AWS_REGION).get_caller_identity()["Account"]
+                _bucket = f"openclaw-tenants-{account}"
+            except Exception:
+                _bucket = "openclaw-tenants-000000000000"
     return _bucket
 
 
