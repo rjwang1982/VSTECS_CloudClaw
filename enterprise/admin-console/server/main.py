@@ -4146,6 +4146,18 @@ def get_im_channels(authorization: str = Header(default="")):
     return result
 
 
+@app.get("/api/v1/settings/demo-mode")
+def get_demo_mode():
+    """Return whether demo mode is enabled (controls demo account display on login page)."""
+    return {"demoMode": os.environ.get("SEED_DEMO_DATA", "false").lower() == "true"}
+
+
+@app.get("/api/v1/settings/demo-mode")
+def get_demo_mode():
+    """Return whether demo mode is enabled (controls demo account display on login page)."""
+    return {"demoMode": os.environ.get("SEED_DEMO_DATA", "false").lower() == "true"}
+
+
 @app.get("/api/v1/settings/services")
 def get_services():
     uptime_str = _format_uptime(time.time() - _SERVER_START_TIME)
