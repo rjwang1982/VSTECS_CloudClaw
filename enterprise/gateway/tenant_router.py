@@ -30,63 +30,160 @@ logger = logging.getLogger(__name__)
 
 STACK_NAME = os.environ.get("STACK_NAME", "dev")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+DYNAMODB_TABLE = os.environ.get("DYNAMODB_TABLE", "openclaw-enterprise")
+DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-east-2")
 RUNTIME_ID = os.environ.get("AGENTCORE_RUNTIME_ID", "")
 ROUTER_PORT = int(os.environ.get("ROUTER_PORT", "8090"))
 
-# Per-tenant runtime override cache (TTL 5 min to avoid SSM call every message)
+# Per-tenant runtime cache (TTL 5 min)
 _runtime_cache: dict = {}
 _runtime_cache_ts: dict = {}
-_RUNTIME_CACHE_TTL = 300  # seconds
+_RUNTIME_CACHE_TTL = 300
+
+# Routing config cache (full CONFIG#routing item)
+_routing_config: dict = {}
+_routing_config_ts: float = 0.0
+_ROUTING_CONFIG_TTL = 300
+
+
+def _get_routing_config() -> dict:
+    """Read routing config from DynamoDB CONFIG#routing, cached 5 min."""
+    global _routing_config, _routing_config_ts
+    now = time.time()
+    if _routing_config and now - _routing_config_ts < _ROUTING_CONFIG_TTL:
+        return _routing_config
+    try:
+        ddb = boto3.resource("dynamodb", region_name=DYNAMODB_REGION)
+        table = ddb.Table(DYNAMODB_TABLE)
+        resp = table.get_item(Key={"PK": "ORG#acme", "SK": "CONFIG#routing"})
+        item = resp.get("Item", {})
+        _routing_config = {
+            "position_runtime": item.get("position_runtime", {}),
+            "employee_override": item.get("employee_override", {}),
+        }
+        _routing_config_ts = now
+        logger.info("Routing config loaded from DynamoDB: %d positions, %d overrides",
+                    len(_routing_config["position_runtime"]),
+                    len(_routing_config["employee_override"]))
+    except Exception as e:
+        logger.warning("DynamoDB routing config load failed, using cached/empty: %s", e)
+        if not _routing_config:
+            _routing_config = {"position_runtime": {}, "employee_override": {}}
+    return _routing_config
+
+
+def _resolve_emp_id(raw_id: str, channel: str) -> str:
+    """Resolve a raw user ID to employee ID via DynamoDB MAPPING# (fallback: SSM)."""
+    if raw_id.startswith("emp-"):
+        return raw_id
+    # Try DynamoDB: MAPPING#{channel}__{raw_id}
+    try:
+        ddb = boto3.resource("dynamodb", region_name=DYNAMODB_REGION)
+        table = ddb.Table(DYNAMODB_TABLE)
+        resp = table.get_item(Key={"PK": "ORG#acme", "SK": f"MAPPING#{channel}__{raw_id}"})
+        item = resp.get("Item")
+        if item:
+            return item.get("employeeId", "")
+        # Try bare userId (no channel prefix)
+        resp2 = table.query(
+            KeyConditionExpression=boto3.dynamodb.conditions.Key("PK").eq("ORG#acme")
+            & boto3.dynamodb.conditions.Key("SK").begins_with("MAPPING#"),
+            FilterExpression=boto3.dynamodb.conditions.Attr("channelUserId").eq(raw_id),
+        )
+        items = resp2.get("Items", [])
+        if items:
+            return items[0].get("employeeId", "")
+    except Exception as e:
+        logger.debug("DynamoDB user-mapping lookup failed: %s", e)
+    # SSM fallback
+    try:
+        ssm = boto3.client("ssm", region_name=AWS_REGION)
+        for key in [f"{channel}__{raw_id}", raw_id]:
+            try:
+                resp = ssm.get_parameter(
+                    Name=f"/openclaw/{STACK_NAME}/user-mapping/{key}")
+                return resp["Parameter"]["Value"]
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return ""
+
+
+def _get_position_for_emp(emp_id: str) -> str:
+    """Get positionId for an employee from DynamoDB (fallback: SSM)."""
+    try:
+        ddb = boto3.resource("dynamodb", region_name=DYNAMODB_REGION)
+        table = ddb.Table(DYNAMODB_TABLE)
+        resp = table.get_item(Key={"PK": "ORG#acme", "SK": f"EMP#{emp_id}"})
+        item = resp.get("Item")
+        if item and item.get("positionId"):
+            return item["positionId"]
+    except Exception as e:
+        logger.debug("DynamoDB employee lookup failed: %s", e)
+    # SSM fallback
+    try:
+        ssm = boto3.client("ssm", region_name=AWS_REGION)
+        resp = ssm.get_parameter(Name=f"/openclaw/{STACK_NAME}/tenants/{emp_id}/position")
+        return resp["Parameter"]["Value"]
+    except Exception:
+        return ""
 
 
 def _get_runtime_id_for_tenant(base_id: str) -> str:
-    """Resolve runtime ID for a tenant using a 3-tier fallback chain:
+    """Resolve runtime ID for a tenant — 3-tier chain via DynamoDB (SSM fallback).
 
-    1. Employee-level  SSM /tenants/{emp_id}/runtime-id      (explicit per-employee)
-    2. Position-level  SSM /positions/{pos_id}/runtime-id    (set per position in Admin Console)
-    3. Default runtime AGENTCORE_RUNTIME_ID env var
-
-    Position is read from SSM /tenants/{emp_id}/position (written at onboarding).
-    All lookups are cached for 5 minutes to minimise SSM API calls.
+    1. Employee override  DynamoDB CONFIG#routing.employee_override[emp_id]
+    2. Position rule      DynamoDB CONFIG#routing.position_runtime[positionId]
+    3. Default            AGENTCORE_RUNTIME_ID env var
     """
     now = time.time()
     cache_key = f"runtime__{base_id}"
     if cache_key in _runtime_cache and now - _runtime_cache_ts.get(cache_key, 0) < _RUNTIME_CACHE_TTL:
         return _runtime_cache[cache_key]
 
-    ssm = boto3.client("ssm", region_name=AWS_REGION)
+    cfg = _get_routing_config()
 
-    # Tier 1: explicit per-employee override
+    # Tier 1: employee override
+    if base_id in cfg.get("employee_override", {}):
+        runtime = cfg["employee_override"][base_id]
+        _runtime_cache[cache_key] = runtime
+        _runtime_cache_ts[cache_key] = now
+        logger.info("Runtime (employee override DDB) %s → %s", base_id, runtime)
+        return runtime
+
+    # Tier 2: position-level
+    pos_id = _get_position_for_emp(base_id)
+    if pos_id and pos_id in cfg.get("position_runtime", {}):
+        runtime = cfg["position_runtime"][pos_id]
+        _runtime_cache[cache_key] = runtime
+        _runtime_cache_ts[cache_key] = now
+        logger.info("Runtime (position DDB %s) %s → %s", pos_id, base_id, runtime)
+        return runtime
+
+    # SSM fallback (backward compat during transition)
+    ssm = boto3.client("ssm", region_name=AWS_REGION)
     try:
         resp = ssm.get_parameter(Name=f"/openclaw/{STACK_NAME}/tenants/{base_id}/runtime-id")
         runtime = resp["Parameter"]["Value"]
         _runtime_cache[cache_key] = runtime
         _runtime_cache_ts[cache_key] = now
-        logger.info("Runtime (employee override) %s → %s", base_id, runtime)
+        logger.info("Runtime (employee SSM fallback) %s → %s", base_id, runtime)
         return runtime
     except Exception:
         pass
+    if pos_id:
+        try:
+            resp = ssm.get_parameter(Name=f"/openclaw/{STACK_NAME}/positions/{pos_id}/runtime-id")
+            runtime = resp["Parameter"]["Value"]
+            _runtime_cache[cache_key] = runtime
+            _runtime_cache_ts[cache_key] = now
+            logger.info("Runtime (position SSM fallback %s) %s → %s", pos_id, base_id, runtime)
+            return runtime
+        except Exception:
+            pass
 
-    # Tier 2: position-level runtime
-    try:
-        pos_resp = ssm.get_parameter(Name=f"/openclaw/{STACK_NAME}/tenants/{base_id}/position")
-        pos_id = pos_resp["Parameter"]["Value"]
-        pos_cache_key = f"runtime__pos__{pos_id}"
-        if pos_cache_key in _runtime_cache and now - _runtime_cache_ts.get(pos_cache_key, 0) < _RUNTIME_CACHE_TTL:
-            runtime = _runtime_cache[pos_cache_key]
-        else:
-            rt_resp = ssm.get_parameter(Name=f"/openclaw/{STACK_NAME}/positions/{pos_id}/runtime-id")
-            runtime = rt_resp["Parameter"]["Value"]
-            _runtime_cache[pos_cache_key] = runtime
-            _runtime_cache_ts[pos_cache_key] = now
-        _runtime_cache[cache_key] = runtime
-        _runtime_cache_ts[cache_key] = now
-        logger.info("Runtime (position %s) %s → %s", pos_id, base_id, runtime)
-        return runtime
-    except Exception:
-        pass
-
-    # Tier 3: default runtime
+    # Tier 3: default
     logger.info("Runtime (default) %s → %s", base_id, RUNTIME_ID)
     return RUNTIME_ID
 
@@ -407,12 +504,21 @@ class TenantRouterHandler(BaseHTTPRequestHandler):
             self._respond(400, {"error": "message required"})
             return
 
-        # Derive tenant and route
+        # Derive tenant and route.
+        # For IM channels (feishu, telegram, discord etc.), user_id may be a platform ID
+        # (e.g. Feishu OU ID). Resolve to emp_id via DynamoDB MAPPING# so that routing
+        # uses the employee's position and runtime config correctly.
+        resolved_emp_id = _resolve_emp_id(user_id, channel)
+        routing_id = resolved_emp_id if resolved_emp_id else user_id
+
         try:
             tenant_id = derive_tenant_id(channel, user_id)
         except ValueError as e:
             self._respond(400, {"error": str(e)})
             return
+
+        # Resolve runtime using the resolved emp_id (fixes IM channel routing to correct tier)
+        runtime_id = _get_runtime_id_for_tenant(routing_id) or RUNTIME_ID
 
         try:
             # Check if this routes to an always-on Docker container

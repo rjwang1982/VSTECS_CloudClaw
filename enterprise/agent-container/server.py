@@ -300,29 +300,47 @@ def _ensure_workspace_assembled(tenant_id: str) -> None:
             # channel__user_id → take user_id (second part, the actual identifier)
             base_id = parts[1]
 
-        # Check SSM user-mapping for IM channel user IDs
-        # e.g., discord__1460888812426363004 → emp-carol
+        # Resolve IM channel user IDs (e.g. Feishu OU ID) to employee IDs.
+        # Checks DynamoDB MAPPING# first, SSM as fallback.
         if not base_id.startswith("emp-"):
             try:
                 import boto3 as _b3_mapping
-                ssm = _b3_mapping.client("ssm", region_name=AWS_REGION_RUNTIME)
-                # Try multiple mapping key formats
-                mapping_keys = [
-                    f"{parts[0]}__{base_id}" if len(parts) >= 2 else base_id,  # channel__userId
-                    base_id,  # just userId
-                    tenant_id,  # full tenant_id
-                ]
-                for mapping_key in mapping_keys:
-                    try:
-                        resp = ssm.get_parameter(Name=f"/openclaw/{STACK_NAME}/user-mapping/{mapping_key}")
-                        resolved = resp["Parameter"]["Value"]
-                        logger.info("SSM user-mapping resolved: %s → %s", mapping_key, resolved)
+                ddb = _b3_mapping.resource("dynamodb", region_name=os.environ.get("DYNAMODB_REGION", "us-east-2"))
+                table = ddb.Table(os.environ.get("DYNAMODB_TABLE", "openclaw-enterprise"))
+                channel_prefix = parts[0] if len(parts) >= 2 else ""
+                # Try exact channel+userId key first
+                resp_ddb = table.get_item(Key={"PK": "ORG#acme", "SK": f"MAPPING#{channel_prefix}__{base_id}"})
+                ddb_item = resp_ddb.get("Item")
+                if ddb_item:
+                    resolved = ddb_item.get("employeeId", "")
+                    logger.info("DynamoDB user-mapping resolved: %s__%s → %s", channel_prefix, base_id, resolved)
+                    base_id = resolved
+                else:
+                    # Scan all MAPPING# items for this channelUserId (handles channel-prefix mismatch)
+                    from boto3.dynamodb.conditions import Key as _Key, Attr as _Attr
+                    scan_resp = table.query(
+                        KeyConditionExpression=_Key("PK").eq("ORG#acme") & _Key("SK").begins_with("MAPPING#"),
+                        FilterExpression=_Attr("channelUserId").eq(base_id),
+                    )
+                    if scan_resp.get("Items"):
+                        resolved = scan_resp["Items"][0].get("employeeId", "")
+                        logger.info("DynamoDB user-mapping (scan) resolved: %s → %s", base_id, resolved)
                         base_id = resolved
-                        break
-                    except Exception:
-                        pass
+                    else:
+                        # SSM fallback for backward compat
+                        ssm = _b3_mapping.client("ssm", region_name=AWS_REGION_RUNTIME)
+                        for mapping_key in [f"{channel_prefix}__{base_id}", base_id]:
+                            try:
+                                resp = ssm.get_parameter(
+                                    Name=f"/openclaw/{STACK_NAME}/user-mapping/{mapping_key}")
+                                resolved = resp["Parameter"]["Value"]
+                                logger.info("SSM user-mapping fallback resolved: %s → %s", mapping_key, resolved)
+                                base_id = resolved
+                                break
+                            except Exception:
+                                pass
             except Exception as e:
-                logger.warning("SSM user-mapping lookup failed: %s", e)
+                logger.warning("User-mapping lookup failed: %s", e)
 
         # 0. Load shared OpenClaw credentials (discord allowFrom list) into microVM
         #    This is how the microVM knows which Discord users are approved.

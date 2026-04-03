@@ -43,9 +43,15 @@ def read_s3(s3, bucket: str, key: str) -> str:
 
 
 def get_tenant_position(ssm, stack_name: str, tenant_id: str) -> str:
-    """Get the position ID for a tenant from SSM.
-    Handles Tenant Router's ID transformation: play__<base_id>__<hash>
-    Tries full ID first, then strips prefix/suffix to find base ID."""
+    """Get the position ID for a tenant.
+
+    Resolution order:
+    1. SSM /tenants/{tenant_id}/position  (exact match)
+    2. Strip prefix → base_id, then SSM /tenants/{base_id}/position
+    3. If base_id is not an emp-id, resolve via DynamoDB user-mapping → emp_id,
+       then read positionId from DynamoDB employees table.
+       (Fixes IM channel users: Feishu OU IDs, Discord numeric IDs, etc.)
+    """
     # Try exact match first
     try:
         resp = ssm.get_parameter(
@@ -56,15 +62,11 @@ def get_tenant_position(ssm, stack_name: str, tenant_id: str) -> str:
         pass
 
     # Strip Tenant Router prefix/suffix: <channel>__<user_id>__<hash>
-    # Examples: play__emp-w5__abc123, port__emp-w5__abc123, tg__emp-w5__abc123
     base_id = tenant_id
     parts = base_id.split("__")
     if len(parts) >= 3:
-        # Format: channel__user_id__hash — extract user_id
         base_id = parts[1]
     elif len(parts) == 2:
-        # Format: channel__user_id (e.g. personal__emp-dickson, portal__emp-jiade)
-        # Take the second part (user_id), not the first (channel prefix)
         base_id = parts[1]
 
     if base_id != tenant_id:
@@ -76,6 +78,52 @@ def get_tenant_position(ssm, stack_name: str, tenant_id: str) -> str:
             return resp["Parameter"]["Value"]
         except ClientError:
             pass
+
+    # If base_id is not an emp-id, it's a channel user ID (e.g. Feishu OU ID).
+    # Resolve via DynamoDB user-mapping → emp_id → positionId.
+    if not base_id.startswith("emp-"):
+        try:
+            import boto3 as _b3wa
+            ddb_region = os.environ.get("DYNAMODB_REGION", "us-east-2")
+            ddb_table = os.environ.get("DYNAMODB_TABLE", "openclaw-enterprise")
+            ddb = _b3wa.resource("dynamodb", region_name=ddb_region)
+            table = ddb.Table(ddb_table)
+
+            # Find the emp_id via MAPPING# scan
+            channel_prefix = parts[0] if len(parts) >= 2 else ""
+            emp_id = ""
+            resp_ddb = table.get_item(
+                Key={"PK": "ORG#acme", "SK": f"MAPPING#{channel_prefix}__{base_id}"})
+            ddb_item = resp_ddb.get("Item")
+            if ddb_item:
+                emp_id = ddb_item.get("employeeId", "")
+            else:
+                from boto3.dynamodb.conditions import Key as _Key, Attr as _Attr
+                scan = table.query(
+                    KeyConditionExpression=_Key("PK").eq("ORG#acme") & _Key("SK").begins_with("MAPPING#"),
+                    FilterExpression=_Attr("channelUserId").eq(base_id),
+                )
+                if scan.get("Items"):
+                    emp_id = scan["Items"][0].get("employeeId", "")
+
+            if emp_id:
+                logger.info("DynamoDB user-mapping resolved %s → %s", base_id, emp_id)
+                # Get positionId from DynamoDB employees table
+                emp_resp = table.get_item(Key={"PK": "ORG#acme", "SK": f"EMP#{emp_id}"})
+                emp_item = emp_resp.get("Item", {})
+                pos_id = emp_item.get("positionId", "")
+                if pos_id:
+                    logger.info("DynamoDB employee position %s → %s", emp_id, pos_id)
+                    return pos_id
+                # Fallback: SSM for the resolved emp_id
+                try:
+                    resp = ssm.get_parameter(
+                        Name=f"/openclaw/{stack_name}/tenants/{emp_id}/position")
+                    return resp["Parameter"]["Value"]
+                except ClientError:
+                    pass
+        except Exception as e:
+            logger.warning("DynamoDB position resolution failed (non-fatal): %s", e)
 
     logger.info("No position found for tenant %s (base: %s)", tenant_id, base_id)
     return ""
@@ -226,16 +274,37 @@ def assemble_workspace(
         elif len(parts) == 2:
             base_id = parts[1]
 
-        prefix = f"/openclaw/{stack_name}/user-mapping/"
-        paginator = ssm_client.get_paginator("get_parameters_by_path")
+        # Look up all IM connections for this employee from DynamoDB MAPPING#.
+        # Fallback to SSM if DynamoDB returns nothing (pre-migration).
         channel_lines = []
-        for page in paginator.paginate(Path=prefix, Recursive=True):
-            for p in page.get("Parameters", []):
-                if p.get("Value") == base_id:
-                    key = p["Name"].replace(prefix, "")
-                    if "__" in key:
-                        ch, uid = key.split("__", 1)
+        try:
+            import boto3 as _b3ch
+            from boto3.dynamodb.conditions import Key as _KeyC
+            ddb_region = os.environ.get("DYNAMODB_REGION", "us-east-2")
+            ddb_table = os.environ.get("DYNAMODB_TABLE", "openclaw-enterprise")
+            ddb = _b3ch.resource("dynamodb", region_name=ddb_region)
+            table = ddb.Table(ddb_table)
+            scan = table.query(
+                KeyConditionExpression=_KeyC("PK").eq("ORG#acme") & _KeyC("SK").begins_with("MAPPING#"),
+            )
+            for item in scan.get("Items", []):
+                if item.get("employeeId") == base_id:
+                    ch = item.get("channel", "")
+                    uid = item.get("channelUserId", "")
+                    if ch and uid:
                         channel_lines.append(f"- **{ch}**: {uid}")
+        except Exception as e:
+            logger.warning("DynamoDB CHANNELS.md lookup failed, falling back to SSM: %s", e)
+            # SSM fallback
+            prefix = f"/openclaw/{stack_name}/user-mapping/"
+            paginator = ssm_client.get_paginator("get_parameters_by_path")
+            for page in paginator.paginate(Path=prefix, Recursive=True):
+                for p in page.get("Parameters", []):
+                    if p.get("Value") == base_id:
+                        key = p["Name"].replace(prefix, "")
+                        if "__" in key:
+                            ch, uid = key.split("__", 1)
+                            channel_lines.append(f"- **{ch}**: {uid}")
         if channel_lines:
             content = (
                 "# Notification Channels\n\n"

@@ -997,16 +997,24 @@ def _mapping_prefix():
     return f"/openclaw/{stack}/user-mapping/"
 
 def _write_user_mapping(channel: str, channel_user_id: str, employee_id: str):
-    """Write SSM mapping: channel__user_id → employee_id"""
+    """Write user mapping to DynamoDB (primary) + SSM (dual-write for legacy components)."""
+    try:
+        db.create_user_mapping(channel, channel_user_id, employee_id)
+    except Exception as e:
+        print(f"[user-mapping] DynamoDB write failed: {e}")
+    # SSM dual-write kept for tenant_router/agent-container backward compat
     key = f"{channel}__{channel_user_id}"
     path = f"{_mapping_prefix()}{key}"
     try:
         _ssm_client().put_parameter(Name=path, Value=employee_id, Type="String", Overwrite=True)
     except Exception as e:
-        print(f"[user-mapping] SSM write failed: {e}")
+        print(f"[user-mapping] SSM dual-write failed (non-fatal): {e}")
 
 def _read_user_mapping(channel: str, channel_user_id: str) -> str:
-    """Read SSM mapping: channel__user_id → employee_id"""
+    """Read user mapping — DynamoDB first, SSM fallback."""
+    m = db.get_user_mapping(channel, channel_user_id)
+    if m:
+        return m.get("employeeId", "")
     key = f"{channel}__{channel_user_id}"
     path = f"{_mapping_prefix()}{key}"
     try:
@@ -1016,7 +1024,11 @@ def _read_user_mapping(channel: str, channel_user_id: str) -> str:
         return ""
 
 def _list_user_mappings() -> list:
-    """List all user mappings from SSM."""
+    """List all user mappings — DynamoDB primary, SSM fallback."""
+    ddb = db.get_user_mappings()
+    if ddb:
+        return ddb
+    # SSM fallback for fresh deploys before migration runs
     prefix = _mapping_prefix()
     try:
         ssm = _ssm_client()
@@ -1032,7 +1044,6 @@ def _list_user_mappings() -> list:
                         "channel": parts[0],
                         "channelUserId": parts[1],
                         "employeeId": p["Value"],
-                        "ssmPath": p["Name"],
                     })
             token = resp.get("NextToken")
             if not token:
@@ -1040,7 +1051,7 @@ def _list_user_mappings() -> list:
             params["NextToken"] = token
         return mappings
     except Exception as e:
-        print(f"[user-mapping] SSM list failed: {e}")
+        print(f"[user-mapping] SSM fallback failed: {e}")
         return []
 
 @app.get("/api/v1/bindings/user-mappings")
