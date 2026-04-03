@@ -546,6 +546,7 @@ Resources:
           chown -R ubuntu:ubuntu /home/ubuntu/app
 
           # ---- Systemd service ----
+          JWT_SECRET=$(openssl rand -hex 32)
           tee /etc/systemd/system/openclaw-admin.service > /dev/null <<SVCEOF
           [Unit]
           Description=VSTECS CloudClaw Admin Console
@@ -561,6 +562,7 @@ Resources:
           Environment=CONSOLE_PORT=8099
           Environment=ADMIN_PASSWORD=${AdminPassword}
           Environment=BEDROCK_MODEL=${BedrockModel}
+          Environment=JWT_SECRET=$JWT_SECRET
           ExecStart=/usr/bin/python3 main.py
           Restart=always
           RestartSec=5
