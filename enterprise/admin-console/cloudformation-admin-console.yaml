@@ -528,6 +528,7 @@ Resources:
           # ---- Seed DynamoDB demo data ----
           if [ "$SEED_DATA" = "true" ]; then
             export DYNAMODB_TABLE
+            export S3_BUCKET
             python3 seed_dynamodb.py --region $AWS_REGION --table $DYNAMODB_TABLE || true
             python3 seed_roles.py --region $AWS_REGION --table $DYNAMODB_TABLE 2>/dev/null || true
             python3 seed_skills_final.py --region $AWS_REGION --table $DYNAMODB_TABLE 2>/dev/null || true
