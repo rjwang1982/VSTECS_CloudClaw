@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { LogIn, AlertCircle } from 'lucide-react';
@@ -18,6 +18,10 @@ const DEMO_ACCOUNTS = [
 ];
 
 export default function Login() {
+  const [demoMode, setDemoMode] = useState(false);
+  useEffect(() => {
+    fetch('/api/v1/settings/demo-mode').then(r => r.json()).then(d => setDemoMode(d.demoMode)).catch(() => {});
+  }, []);
   const { login } = useAuth();
   const navigate = useNavigate();
   const [empId, setEmpId] = useState('');
@@ -90,7 +94,8 @@ export default function Login() {
           </div>
         </div>
 
-        {/* Demo Accounts — reference only */}
+        {/* Demo Accounts — only shown when SeedDemoData=true */}
+        {demoMode && (
         <div className="rounded-xl border border-dark-border bg-dark-card p-6">
           <h3 className="text-sm font-semibold text-text-muted uppercase tracking-wider mb-3">Demo Accounts</h3>
           <div className="space-y-2">
@@ -133,6 +138,7 @@ export default function Login() {
           </div>
           <p className="text-[10px] text-text-muted mt-3 text-center">Click to fill Employee ID · Password required for all accounts</p>
         </div>
+        )}
 
         {/* Contributor */}
         <div className="text-center mt-6">
