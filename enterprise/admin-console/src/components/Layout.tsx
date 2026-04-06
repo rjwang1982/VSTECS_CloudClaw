@@ -46,6 +46,7 @@ const ADMIN_NAV: NavItem[] = [
   { label: 'Usage & Cost', href: '/usage', icon: <DollarSign size={20} /> },
   { label: 'Playground', href: '/playground', icon: <Gamepad2 size={20} /> },
   { label: 'Settings', href: '/settings', icon: <Settings size={20} /> },
+  { label: 'My Portal', href: '/portal', icon: <User size={20} /> },
 ];
 
 // Manager nav — own dept data only, no platform-wide settings
@@ -61,6 +62,7 @@ const MANAGER_NAV: NavItem[] = [
   { label: 'Approvals', href: '/approvals', icon: <CheckCircle size={20} /> },
   { label: 'Monitor', href: '/monitor', icon: <Activity size={20} /> },
   { label: 'Audit Center', href: '/audit', icon: <Shield size={20} /> },
+  { label: 'My Portal', href: '/portal', icon: <User size={20} /> },
 ];
 
 // Choose nav based on role (set dynamically in Layout component)
@@ -218,16 +220,6 @@ export default function Layout({ children }: { children: ReactNode }) {
           {NAV_ITEMS.map(item => (
             <SidebarItem key={item.label} item={item} collapsed={!sidebarOpen} />
           ))}
-          {/* Manager: quick link to own Portal */}
-          {user?.role === 'manager' && (
-            <button
-              onClick={() => navigate('/portal')}
-              className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm text-text-secondary hover:bg-dark-hover hover:text-text-primary transition-colors mt-2 border-t border-dark-border/30 pt-4"
-            >
-              <Users size={20} />
-              {sidebarOpen && <span>My Portal</span>}
-            </button>
-          )}
         </nav>
 
         {/* Theme toggle + Collapse */}
