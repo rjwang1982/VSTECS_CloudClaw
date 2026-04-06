@@ -119,7 +119,7 @@ export default function Positions() {
                 <div className="rounded-lg bg-warning/5 border border-warning/20 p-3 flex items-center justify-between">
                   <div>
                     <p className="text-sm font-medium text-warning">{stats.unbound} employee(s) without agents</p>
-                    <p className="text-xs text-text-muted">Auto-create 1:1 agents with position SOUL template and default skills</p>
+                    <p className="text-xs text-text-muted">Auto-create Serverless agents with position SOUL template and default skills</p>
                   </div>
                   <Button variant="primary" size="sm" onClick={() => handleProvision(selected.id, selected.defaultChannel)} disabled={bulkProvision.isPending}>
                     <Zap size={14} /> {bulkProvision.isPending ? 'Provisioning...' : `Provision All (${stats.unbound})`}

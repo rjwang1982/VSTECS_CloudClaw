@@ -312,7 +312,7 @@ export default function Employees() {
               ) : (
                 <div className="rounded-lg bg-amber-500/5 border border-amber-500/20 p-4">
                   <p className="text-sm text-amber-400 mb-2">No agent bound</p>
-                  <p className="text-xs text-text-muted mb-3">This employee doesn't have a personal AI agent yet. Create one to enable AI-assisted work.</p>
+                  <p className="text-xs text-text-muted mb-3">This employee doesn't have an AI agent yet. Create one in Agent Factory to enable AI-assisted work.</p>
                   <Button variant="primary" size="sm" onClick={() => {
                     setSelected(null);
                     navigate('/agents');
@@ -330,7 +330,7 @@ export default function Employees() {
                       <div key={b.id} className="flex items-center justify-between rounded-lg bg-dark-bg px-3 py-2">
                         <div className="flex items-center gap-2">
                           <span className="text-sm">{b.agentName}</span>
-                          <Badge color={b.mode === '1:1' ? 'success' : b.mode === 'N:1' ? 'info' : 'default'}>{b.mode}</Badge>
+                          <Badge color="success">{CHANNEL_LABELS[b.channel as ChannelType]}</Badge>
                         </div>
                         <div className="flex items-center gap-2">
                           <Badge color="info">{CHANNEL_LABELS[b.channel as ChannelType]}</Badge>
@@ -488,7 +488,7 @@ export default function Employees() {
           </div>
           <div className="rounded-lg bg-primary/5 border border-primary/20 p-3 text-xs text-text-secondary">
             <Zap size={14} className="inline mr-1 text-primary-light" />
-            A personal 1:1 agent will be auto-provisioned based on the position's SOUL template, default skills, and channel settings. The employee can start chatting immediately after IM pairing.
+            A Serverless agent will be auto-provisioned based on the position's SOUL template and default skills. The employee can start chatting immediately via Portal or after IM pairing.
           </div>
         </div>
       </Modal>
