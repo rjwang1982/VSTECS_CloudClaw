@@ -2592,22 +2592,42 @@ def portal_channels(authorization: str = Header(default="")):
                 connected.append(channel_prefix)
 
     # Build pairing instructions based on mode
-    pairing_mode = "direct" if is_always_on and any(dedicated_bots.values()) else "shared-gateway"
-    instructions = {}
-    if pairing_mode == "shared-gateway":
-        instructions = {
-            "telegram": "Scan the QR code or click the link to start a chat with the shared ACME Agent bot. Send /start to complete pairing.",
-            "discord": "Click the invite link to add ACME Agent to your server, then DM the bot and send /start.",
-            "whatsapp": "Scan the QR code with your phone's WhatsApp. The pairing link will expire in 5 minutes.",
-            "mode_note": "You are using the shared organization bot. All employees share the same bot; your agent is identified by your user ID."
-        }
+    has_dedicated = any(dedicated_bots.values())
+    pairing_mode = "direct" if is_always_on and has_dedicated else "shared-gateway"
+
+    # Channel-specific pairing instructions
+    ch_instructions = {
+        "telegram": "Scan the QR code or click the link to open a chat with the company bot. Send /start to complete pairing.",
+        "discord": "Click the invite link to add the company bot to your server, then DM the bot and send /start.",
+        "whatsapp": "Scan the QR code with your phone's WhatsApp. The pairing link expires in 5 minutes.",
+        "feishu": "Open the Feishu bot link and send a message to start pairing.",
+        "slack": "Open the Slack bot link and send /start in a DM to pair.",
+    }
+
+    # Override with dedicated bot instructions for channels that have tokens
+    if has_dedicated:
+        for ch, has_token in dedicated_bots.items():
+            if has_token:
+                ch_instructions[ch] = f"Your agent has a dedicated {ch.title()} bot. Messages go directly to your always-on agent — no pairing needed."
+
+    # Mode banner text
+    if is_always_on and has_dedicated:
+        ch_instructions["mode_note"] = (
+            "Your agent is Always-on with a dedicated IM bot. "
+            "Messages go directly to your persistent agent — instant response, no cold start."
+        )
+    elif is_always_on:
+        ch_instructions["mode_note"] = (
+            "Your agent is Always-on (instant response, no cold start). "
+            "Connect via the company bot below — your messages are routed to your dedicated agent container."
+        )
     else:
-        instructions = {
-            "telegram": "Your agent has a dedicated Telegram bot. Click the link or search for your bot username to start a direct conversation. Send /start to activate.",
-            "discord": "Your agent has a dedicated Discord bot. Use the provided invite link to connect your personal agent.",
-            "whatsapp": "Scan the QR code to connect your personal WhatsApp to your dedicated agent.",
-            "mode_note": "You are using a dedicated personal bot in Always-on mode. Your agent is exclusively yours — messages go directly to your persistent agent, not through a shared gateway.",
-        }
+        ch_instructions["mode_note"] = (
+            "Your agent starts on demand when you send a message. "
+            "Connect via the company bot below — first message may take a few seconds."
+        )
+
+    instructions = ch_instructions
 
     return {
         "connected": connected,

@@ -359,7 +359,7 @@ export default function BindIM() {
         )}
         <div>
           <p className="text-sm font-medium text-text-primary">
-            {deployMode === 'always-on-ecs' ? 'Always-on mode' : 'On-demand mode'}
+            {deployMode === 'always-on-ecs' ? '⚡ Always-on' : 'Serverless'}
           </p>
           <p className="text-xs text-text-muted mt-0.5">
             {instructions.mode_note || (
