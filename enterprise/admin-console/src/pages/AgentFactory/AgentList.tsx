@@ -65,10 +65,10 @@ export default function AgentList() {
     ? qualityAgents.reduce((s, a) => s + (a.qualityScore || 0), 0) / qualityAgents.length
     : null;
 
-  const personalAgents = AGENTS.filter(a => a.employeeId !== null);
-  const sharedAgents = AGENTS.filter(a => a.employeeId === null);
+  const serverlessAgents = AGENTS.filter(a => a.deployMode !== 'always-on-ecs');
+  const alwaysOnAgents = AGENTS.filter(a => a.deployMode === 'always-on-ecs');
 
-  const currentList = activeTab === 'personal' ? personalAgents : activeTab === 'shared' ? sharedAgents : AGENTS;
+  const currentList = activeTab === 'serverless' ? serverlessAgents : activeTab === 'always-on' ? alwaysOnAgents : AGENTS;
 
   // Unique departments from agents
   const deptSet = new Set(AGENTS.map(a => a.positionName));
@@ -91,8 +91,8 @@ export default function AgentList() {
 
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-5 mb-6">
         <StatCard title="Total Agents" value={AGENTS.length} icon={<Bot size={22} />} color="primary" />
-        <StatCard title="Personal (1:1)" value={personalAgents.length} icon={<Users size={22} />} color="info" />
-        <StatCard title="Shared (N:1)" value={sharedAgents.length} icon={<Users size={22} />} color="cyan" />
+        <StatCard title="Serverless" value={serverlessAgents.length} icon={<Users size={22} />} color="info" />
+        <StatCard title="Always-on" value={alwaysOnAgents.length} icon={<Zap size={22} />} color="cyan" />
         <StatCard title="Active" value={AGENTS.filter(a => a.status === 'active').length} icon={<Zap size={22} />} color="success" />
         <StatCard title="Avg Quality" value={avgQuality !== null ? `⭐ ${avgQuality.toFixed(1)}` : '—'} icon={<Star size={22} />} color="warning" />
       </div>
@@ -100,8 +100,8 @@ export default function AgentList() {
       <Card>
         <Tabs
           tabs={[
-            { id: 'personal', label: 'Personal Agents', count: personalAgents.length },
-            { id: 'shared', label: 'Shared / Team Agents', count: sharedAgents.length },
+            { id: 'serverless', label: 'Serverless', count: serverlessAgents.length },
+            { id: 'always-on', label: 'Always-on (Fargate)', count: alwaysOnAgents.length },
             { id: 'all', label: 'All', count: AGENTS.length },
             { id: 'config', label: 'Configuration' },
           ]}
@@ -200,21 +200,20 @@ export default function AgentList() {
           </div>
         )}
 
-        {/* Agent list tabs (personal/shared/all) */}
-        {/* Always-on Shared Agent management — shown when shared tab is active */}
-        {activeTab === 'shared' && (
+        {/* Always-on agents — shown when always-on tab is active */}
+        {activeTab === 'always-on' && (
           <div className="mt-4 mb-4">
             <div className="rounded-xl bg-cyan/5 border border-cyan/20 px-4 py-3 mb-4 flex items-start gap-3">
               <Zap size={16} className="text-cyan mt-0.5 shrink-0" />
               <div>
-                <p className="text-sm font-semibold text-text-primary">Always-on · Powered by ECR + Docker</p>
-                <p className="text-xs text-text-muted mt-0.5">Shared agents run as persistent Docker containers on the gateway EC2, eliminating cold starts. Each container exposes a local HTTP endpoint; the Tenant Router routes matched employees directly to it.</p>
+                <p className="text-sm font-semibold text-text-primary">Always-on · Powered by ECS Fargate</p>
+                <p className="text-xs text-text-muted mt-0.5">Always-on agents run as persistent ECS Fargate containers with EFS workspace. Enables scheduled tasks (email every 3 min), direct IM bot connections, and instant response. Same Docker image — just a deployment mode toggle. Auto-restart on crash.</p>
               </div>
             </div>
             <div className="space-y-3">
-              {sharedAgents.map(a => {
-                const isOn = a.deployMode === 'always-on';
-                const isStarting = a.containerStatus === 'starting';
+              {alwaysOnAgents.map(a => {
+                const isOn = a.deployMode === 'always-on-ecs';
+                const isStarting = a.containerStatus === 'starting' || a.containerStatus === 'reloading';
                 return (
                   <div key={a.id} className={`rounded-xl border px-4 py-3 flex items-center gap-3 ${isOn ? 'border-cyan/30 bg-cyan/5' : 'border-dark-border/40 bg-surface-dim'}`}>
                     <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${isOn ? 'bg-cyan/15 text-cyan' : 'bg-dark-hover text-text-muted'}`}>
@@ -224,9 +223,9 @@ export default function AgentList() {
                       <div className="flex items-center gap-2">
                         <p className="text-sm font-semibold text-text-primary">{a.name}</p>
                         {isOn && <Badge color="info" dot>{isStarting ? 'Starting…' : 'Always-on'}</Badge>}
-                        {!isOn && <Badge color="default">Personal / AgentCore</Badge>}
+                        {a.employeeId && <Badge color="default">{a.employeeName || a.employeeId}</Badge>}
                       </div>
-                      <p className="text-xs text-text-muted">{a.positionName}{isOn && a.containerPort ? ` · localhost:${a.containerPort}` : ''}</p>
+                      <p className="text-xs text-text-muted">{a.positionName} · ECS Fargate{a.ecsServiceName ? ` · ${a.ecsServiceName}` : ''}</p>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       <Button size="sm" variant="ghost" onClick={() => navigate(`/agents/${a.id}`)}>
@@ -236,6 +235,7 @@ export default function AgentList() {
                         <Button size="sm" variant="ghost" className="text-danger"
                           onClick={async () => {
                             await fetch(`/api/v1/admin/always-on/${a.id}/stop`, { method: 'POST', headers: { Authorization: `Bearer ${localStorage.getItem('openclaw_token')}` } });
+                            window.location.reload();
                           }}>
                           <Trash2 size={13} /> Stop
                         </Button>
@@ -243,19 +243,20 @@ export default function AgentList() {
                         <Button size="sm" variant="primary"
                           onClick={async () => {
                             await fetch(`/api/v1/admin/always-on/${a.id}/start`, { method: 'POST', headers: { Authorization: `Bearer ${localStorage.getItem('openclaw_token')}` } });
+                            window.location.reload();
                           }}>
-                          <Zap size={13} /> Start Always-on
+                          <Zap size={13} /> Start
                         </Button>
                       )}
                     </div>
                   </div>
                 );
               })}
-              {sharedAgents.length === 0 && (
+              {alwaysOnAgents.length === 0 && (
                 <div className="text-center py-8 text-text-muted">
                   <Bot size={28} className="mx-auto mb-2 opacity-30" />
-                  <p className="text-sm">No shared agents yet</p>
-                  <p className="text-xs mt-1">Create an agent without assigning it to a specific employee</p>
+                  <p className="text-sm">No always-on agents</p>
+                  <p className="text-xs mt-1">Toggle any agent to always-on mode from the agent detail page for scheduled tasks and instant response</p>
                 </div>
               )}
             </div>

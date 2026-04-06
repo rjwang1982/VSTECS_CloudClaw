@@ -56,10 +56,12 @@ export interface Agent {
   qualityScore: number | null;
   createdAt: string;
   updatedAt: string;
-  // Always-on shared agent fields
-  deployMode?: 'personal' | 'always-on';
+  // Always-on agent fields (ECS Fargate)
+  deployMode?: 'personal' | 'always-on' | 'always-on-ecs' | 'serverless';
   containerPort?: number;
-  containerStatus?: 'starting' | 'running' | 'stopped' | 'error';
+  containerStatus?: 'starting' | 'running' | 'stopped' | 'error' | 'reloading';
+  ecsServiceName?: string;
+  ecsTaskArn?: string;
 }
 
 export interface SoulLayer {
