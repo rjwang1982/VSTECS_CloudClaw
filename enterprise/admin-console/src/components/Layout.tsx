@@ -9,7 +9,7 @@ import {
 import { useApprovals, useAlertRules, useAgents, useEmployees } from '../hooks/useApi';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
-import ClawForgeLogo from './ClawForgeLogo';
+import VSTECSLogo from './VSTECSLogo';
 import AdminAssistant from './AdminAssistant';
 import { ErrorBoundary } from './ui';
 import clsx from 'clsx';

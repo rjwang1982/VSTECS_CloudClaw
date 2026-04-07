@@ -4,7 +4,7 @@ import { MessageSquare, User, BarChart3, Puzzle, FileText, LogOut, Sun, Moon, Li
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { api } from '../api/client';
-import ClawForgeLogo from './ClawForgeLogo';
+import VSTECSLogo from './VSTECSLogo';
 import clsx from 'clsx';
 
 const NAV = [
