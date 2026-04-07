@@ -250,9 +250,10 @@ def get_gateway_dashboard(authorization: str = Header(default="")):
         return {"available": False, "reason": "Agent is not always-on"}
 
     base_url, gw_token = result
-    # Call container's /gateway-dashboard API (port 8080)
+    # Call container's /gateway-dashboard API on port 8080 (not 18789)
+    agent_api_url = base_url.replace(":18789", ":8080")
     try:
-        resp = _requests.get(f"{base_url}/gateway-dashboard", timeout=50)
+        resp = _requests.get(f"{agent_api_url}/gateway-dashboard", timeout=50)
         if resp.status_code == 200:
             data = resp.json()
             return {
