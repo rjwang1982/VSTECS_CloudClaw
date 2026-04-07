@@ -269,6 +269,66 @@ function ChannelWizard({ channel, onDone, onCancel }: { channel: Channel; onDone
   );
 }
 
+function GatewayConsoleButton() {
+  const [loading, setLoading] = useState(false);
+  const [countdown, setCountdown] = useState(0);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (countdown <= 0) return;
+    const t = setInterval(() => setCountdown(c => Math.max(0, c - 1)), 1000);
+    return () => clearInterval(t);
+  }, [countdown]);
+
+  const handleClick = async () => {
+    setLoading(true);
+    setError('');
+    setCountdown(20);
+    try {
+      const jwt = localStorage.getItem('openclaw_token') || '';
+      const resp = await fetch('/api/v1/portal/gateway/dashboard', {
+        headers: { 'Authorization': `Bearer ${jwt}` },
+      });
+      const data = await resp.json();
+      if (data.available && data.gatewayToken) {
+        // Open via EC2 direct (port 8098) — bypasses CloudFront for WebSocket support
+        const gwUrl = data.directUrl || `/api/v1/portal/gateway/ui/`;
+        const url = `${gwUrl}?token=${data.gatewayToken}${data.dashboardToken ? '#token=' + data.dashboardToken : ''}`;
+        window.open(url, '_blank');
+      } else {
+        setError(data.reason || 'Gateway Console not available');
+      }
+    } catch (e) {
+      setError('Failed to connect to Gateway Console');
+    } finally {
+      setLoading(false);
+      setCountdown(0);
+    }
+  };
+
+  return (
+    <div className="mt-3 space-y-2">
+      <button
+        className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary/90 transition-colors disabled:opacity-60"
+        onClick={handleClick}
+        disabled={loading}
+      >
+        {loading ? (
+          <>
+            <Loader2 size={14} className="animate-spin" />
+            Generating access token... {countdown > 0 && `(${countdown}s)`}
+          </>
+        ) : (
+          <>
+            <Zap size={14} /> Open Gateway Console
+          </>
+        )}
+      </button>
+      {error && <p className="text-xs text-danger">{error}</p>}
+    </div>
+  );
+}
+
 export default function BindIM() {
   const [selected, setSelected] = useState<Channel | null>(null);
   const [connected, setConnected] = useState<string[]>([]);
@@ -369,28 +429,7 @@ export default function BindIM() {
             )}
           </p>
           {deployMode === 'always-on-ecs' && (
-            <button
-              className="mt-3 inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary/90 transition-colors"
-              onClick={async () => {
-                try {
-                  const token = localStorage.getItem('openclaw_token') || '';
-                  const resp = await fetch('/api/v1/portal/gateway/dashboard', {
-                    headers: { 'Authorization': `Bearer ${token}` },
-                  });
-                  const data = await resp.json();
-                  if (data.available && data.gatewayToken) {
-                    const url = `/api/v1/portal/gateway/ui/?auth_token=${encodeURIComponent(token)}&token=${data.gatewayToken}${data.dashboardToken ? '#token=' + data.dashboardToken : ''}`;
-                    window.open(url, '_blank');
-                  } else {
-                    alert(data.reason || 'Gateway Console not available');
-                  }
-                } catch (e) {
-                  alert('Failed to connect to Gateway Console');
-                }
-              }}
-            >
-              <Zap size={14} /> Open Gateway Console
-            </button>
+            <GatewayConsoleButton />
           )}
         </div>
       </div>

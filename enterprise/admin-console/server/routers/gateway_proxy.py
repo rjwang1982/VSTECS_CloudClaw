@@ -256,11 +256,27 @@ def get_gateway_dashboard(authorization: str = Header(default="")):
         resp = _requests.get(f"{agent_api_url}/gateway-dashboard", timeout=50)
         if resp.status_code == 200:
             data = resp.json()
+            # Build direct URL (EC2 public IP:8098) for WebSocket support
+            # CloudFront doesn't reliably proxy WebSocket, so Gateway Console
+            # connects directly to EC2's nginx which proxies to container:18789
+            import boto3 as _b3_gwd
+            direct_url = None
+            try:
+                instance_id = os.environ.get("GATEWAY_INSTANCE_ID", "")
+                if instance_id:
+                    ec2 = _b3_gwd.client("ec2", region_name=os.environ.get("GATEWAY_REGION", "us-east-1"))
+                    info = ec2.describe_instances(InstanceIds=[instance_id])
+                    public_ip = info["Reservations"][0]["Instances"][0].get("PublicIpAddress", "")
+                    if public_ip:
+                        direct_url = f"http://{public_ip}:8098/"
+            except Exception:
+                pass
             return {
                 "available": True,
                 "gatewayToken": gw_token or data.get("gatewayToken", ""),
                 "dashboardToken": data.get("dashboardToken", ""),
                 "proxyBase": "/api/v1/portal/gateway/ui/",
+                "directUrl": direct_url,
             }
         return {"available": False, "reason": f"Container returned {resp.status_code}: {resp.text[:200]}"}
     except _requests.exceptions.ConnectionError:
