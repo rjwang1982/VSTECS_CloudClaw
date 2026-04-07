@@ -35,3 +35,7 @@ enterprise/demo/dist/
 # Blog / brand assets (local only)
 enterprise/blog/
 enterprise/catnip-mascot/
+enterprise/.env
+enterprise/.env.*
+!enterprise/.env.example
+.claude/

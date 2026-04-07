@@ -7,21 +7,21 @@ import { IM_ICONS } from '../../components/IMIcons';
 interface Channel {
   id: string;
   label: string;
-  icon: string;
   description: string;
-  available: boolean;
-  note?: 'coming-soon' | 'not-enterprise';
 }
 
+// All mainstream IM platforms. Availability is determined dynamically by
+// fetching which channels the admin has configured via OpenClaw Gateway.
 const CHANNELS: Channel[] = [
-  { id: 'telegram', label: 'Telegram', icon: '', description: 'Scan QR or click the link to open @acme_enterprise_bot', available: true },
-  { id: 'discord', label: 'Discord', icon: '', description: 'Connect to ACME Agent in your company Discord server', available: true },
-  { id: 'slack', label: 'Slack', icon: '', description: 'Connect to ACME Agent in your Slack workspace', available: false, note: 'coming-soon' },
-  { id: 'teams', label: 'Microsoft Teams', icon: '', description: 'Connect to ACME Agent in Microsoft Teams', available: false, note: 'coming-soon' },
-  { id: 'feishu', label: 'Feishu / Lark', icon: '', description: 'Connect to the enterprise Feishu bot', available: true },
-  { id: 'googlechat', label: 'Google Chat', icon: '', description: 'Connect to ACME Agent in Google Chat', available: false, note: 'coming-soon' },
-  { id: 'whatsapp', label: 'WhatsApp', icon: '', description: 'Personal messaging — not recommended for enterprise use', available: false, note: 'not-enterprise' },
-  { id: 'wechat', label: 'WeChat', icon: '', description: 'Personal messaging — not recommended for enterprise use', available: false, note: 'not-enterprise' },
+  { id: 'telegram',   label: 'Telegram',         description: 'Scan QR or click the link to open the enterprise bot' },
+  { id: 'discord',    label: 'Discord',           description: 'Connect to the enterprise agent in your company Discord server' },
+  { id: 'feishu',     label: 'Feishu / Lark',     description: 'Connect to the enterprise Feishu bot' },
+  { id: 'dingtalk',   label: 'DingTalk',          description: 'Connect to the enterprise DingTalk bot' },
+  { id: 'slack',      label: 'Slack',             description: 'Connect to the enterprise agent in your Slack workspace' },
+  { id: 'teams',      label: 'Microsoft Teams',   description: 'Connect to the enterprise agent in Microsoft Teams' },
+  { id: 'googlechat', label: 'Google Chat',       description: 'Connect to the enterprise agent in Google Chat' },
+  { id: 'whatsapp',   label: 'WhatsApp',          description: 'Connect via WhatsApp Business' },
+  { id: 'wechat',     label: 'WeChat',            description: 'Connect via WeChat enterprise bot' },
 ];
 
 type StepState = 'idle' | 'feishu-prereq' | 'loading' | 'waiting' | 'done' | 'error' | 'expired';
@@ -275,7 +275,15 @@ export default function BindIM() {
   const [disconnecting, setDisconnecting] = useState<string | null>(null);
   const [confirmDisconnect, setConfirmDisconnect] = useState<string | null>(null);
   const [channelInfo, setChannelInfo] = useState<any>(null);
+  const [adminConfigured, setAdminConfigured] = useState<string[]>([]);
   const connectedRef = useRef<string[]>([]);
+
+  // Fetch which channels admin has configured via OpenClaw Gateway
+  useEffect(() => {
+    api.get<{ configured: string[] }>('/portal/im-channel-status')
+      .then(d => setAdminConfigured(d.configured || []))
+      .catch(() => {});
+  }, []);
 
   const fetchChannels = useCallback(() => {
     api.get<any>('/portal/channels').then(d => {
@@ -338,7 +346,7 @@ export default function BindIM() {
         </p>
       </div>
 
-      {/* Mode Banner — different experience for always-on vs serverless */}
+      {/* Mode Banner */}
       <div className={`rounded-xl border px-4 py-3 flex items-start gap-3 ${
         deployMode === 'always-on-ecs'
           ? 'bg-primary/5 border-primary/20'
@@ -349,48 +357,103 @@ export default function BindIM() {
         ) : (
           <Radio size={16} className="text-text-muted mt-0.5 flex-shrink-0" />
         )}
-        <div>
+        <div className="flex-1">
           <p className="text-sm font-medium text-text-primary">
-            {deployMode === 'always-on-ecs' ? 'Always-on mode' : 'On-demand mode'}
+            {deployMode === 'always-on-ecs' ? '⚡ Always-on' : 'Serverless'}
           </p>
           <p className="text-xs text-text-muted mt-0.5">
             {instructions.mode_note || (
               deployMode === 'always-on-ecs'
-                ? 'Your agent runs 24/7. IM messages go directly to your dedicated agent container.'
-                : 'Your agent starts on demand. IM messages are routed through the shared org gateway.'
+                ? 'Your agent runs 24/7. Open the Gateway Console below to manage your IM connections directly.'
+                : 'Your agent starts on demand. Connect via the company bot below.'
             )}
           </p>
+          {deployMode === 'always-on-ecs' && channelInfo?.agentIp && (
+            <div className="mt-3 rounded-lg bg-dark-bg border border-dark-border p-3 space-y-2.5">
+              <p className="text-xs font-medium text-text-primary">Gateway Console Access</p>
+              <p className="text-xs text-text-muted">
+                Your agent has a dedicated Gateway UI for managing IM channels. Access via SSM port-forward:
+              </p>
+              <div>
+                <p className="text-[10px] text-text-muted mb-1">1. Run in terminal:</p>
+                <div className="relative group">
+                  <code className="block text-[10px] bg-dark-card rounded px-2 py-1.5 text-text-secondary font-mono break-all select-all cursor-pointer"
+                    onClick={(e) => { navigator.clipboard.writeText((e.target as HTMLElement).textContent || ''); }}
+                    title="Click to copy">
+                    {`aws ssm start-session --target ${channelInfo.instanceId || 'i-xxx'} --region us-east-1 --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '{"host":["${channelInfo.agentIp}"],"portNumber":["18789"],"localPortNumber":["18789"]}'`}
+                  </code>
+                </div>
+              </div>
+              <div>
+                <p className="text-[10px] text-text-muted mb-1">2. Open in browser:</p>
+                {channelInfo?.gatewayToken ? (
+                  <a
+                    href={`http://localhost:18789/?token=${channelInfo.gatewayToken}${channelInfo.dashboardToken ? '#token=' + channelInfo.dashboardToken : ''}`}
+                    target="_blank" rel="noopener"
+                    className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
+                  >
+                    <Zap size={12} /> Open Gateway Console (localhost)
+                  </a>
+                ) : (
+                  <span className="text-xs text-text-muted">http://localhost:18789</span>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
+      {/* Serverless: show channel pairing cards. Always-on: show status only */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         {CHANNELS.map(ch => {
           const isConnected = connected.includes(ch.id);
-          const isNotEnterprise = ch.note === 'not-enterprise';
-          const isComingSoon = ch.note === 'coming-soon';
+          const isAvailable = adminConfigured.includes(ch.id);
+          // Stale: employee has an old binding but admin removed/never configured the bot
+          const isStale = isConnected && !isAvailable;
           return (
             <Card key={ch.id} className={`transition-all ${
-              !ch.available
-                ? isNotEnterprise
-                  ? 'opacity-40 cursor-not-allowed grayscale'
-                  : 'opacity-50 cursor-not-allowed'
-                : 'cursor-pointer hover:border-primary/40'
+              isAvailable ? 'cursor-pointer hover:border-primary/40' : 'opacity-60'
             }`}>
               <div className="flex items-start gap-3">
                 <div className="flex-shrink-0 mt-0.5">{(() => { const Icon = IM_ICONS[ch.id]; return Icon ? <Icon size={28} /> : null; })()}</div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-0.5 flex-wrap">
                     <h3 className="text-sm font-semibold text-text-primary">{ch.label}</h3>
-                    {isConnected && <Badge color="success" dot>Connected</Badge>}
-                    {isComingSoon && <Badge color="info">Coming soon</Badge>}
-                    {isNotEnterprise && <Badge color="default">Not for enterprise</Badge>}
+                    {isAvailable && isConnected && <Badge color="success" dot>Connected</Badge>}
+                    {isStale && <Badge color="warning">Bot removed</Badge>}
+                    {!isAvailable && !isConnected && <Badge color="default">Admin not configured</Badge>}
                   </div>
                   <p className="text-xs text-text-muted">
-                    {instructions[ch.id] || ch.description}
+                    {isStale
+                      ? 'This channel is no longer active. Contact IT admin or disconnect to clean up.'
+                      : isAvailable
+                        ? (instructions[ch.id] || ch.description)
+                        : 'Contact your IT admin to enable this channel.'}
                   </p>
                 </div>
               </div>
-              {ch.available && (
+              {/* Stale: show disconnect to clean up the dead binding */}
+              {isStale && (
+                <div className="mt-3">
+                  {confirmDisconnect === ch.id ? (
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-danger flex-1">Remove stale binding?</span>
+                      <Button variant="danger" size="sm" disabled={disconnecting === ch.id}
+                        onClick={() => handleDisconnect(ch.id)}>
+                        {disconnecting === ch.id ? <Loader2 size={12} className="animate-spin" /> : 'Confirm'}
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={() => setConfirmDisconnect(null)}>Cancel</Button>
+                    </div>
+                  ) : (
+                    <Button variant="ghost" size="sm" className="w-full text-text-muted text-xs"
+                      onClick={() => setConfirmDisconnect(ch.id)}>
+                      Remove binding
+                    </Button>
+                  )}
+                </div>
+              )}
+              {/* Normal: available channel — connect / reconnect / disconnect */}
+              {isAvailable && (
                 <div className="mt-3 space-y-1.5">
                   {isConnected ? (
                     <>
@@ -421,11 +484,6 @@ export default function BindIM() {
                       <Link2 size={13} /> Connect
                     </Button>
                   )}
-                </div>
-              )}
-              {isComingSoon && (
-                <div className="mt-3">
-                  <p className="text-[10px] text-text-muted text-center">Enterprise support coming soon</p>
                 </div>
               )}
             </Card>

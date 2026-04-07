@@ -60,7 +60,7 @@ INSTANCE_ID=$(aws cloudformation describe-stacks \
 
 aws ssm start-session \
   --target $INSTANCE_ID \
-  --region YOUR_REGION \
+  --region us-west-2  # change to your deployment region \
   --document-name AWS-StartPortForwardingSession \
   --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
 
@@ -230,8 +230,9 @@ Switch models with one CloudFormation parameter — no code changes:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `OpenClawModel` | Nova 2 Lite | Bedrock model ID |
+| `OpenClawVersion` | 2026.3.24 | `2026.3.24` (default, no model approval needed, WeChat compatible), `2026.4.5` (auto-discovery, embeddings), or `latest` |
 | `InstanceType` | c7g.large | EC2 instance type |
-| `CreateVPCEndpoints` | true | Private networking (+$22/mo) |
+| `CreateVPCEndpoints` | false | Private networking (+$22/mo) |
 | `EnableSandbox` | true | Docker isolation for code execution |
 | `EnableDataProtection` | false | Retain EBS volume on stack deletion |
 | `KeyPairName` | none | EC2 key pair (optional, for emergency SSH) |
@@ -245,7 +246,7 @@ Switch models with one CloudFormation parameter — no code changes:
 
 Best for most users. Fixed cost, full control, 24/7 availability.
 
-### Multi-Tenant Platform (AgentCore Runtime) — [README_AGENTCORE.md](README_AGENTCORE.md)
+### Multi-Tenant Platform (AgentCore Runtime) — [README_ENTERPRISE.md](README_ENTERPRISE.md)
 
 > ✅ **E2E verified** — Full pipeline running: IM → Gateway → Bedrock H2 Proxy → Tenant Router → AgentCore Firecracker microVM → OpenClaw CLI → Bedrock → response. [Demo Guide →](demo/README.md)
 
@@ -280,7 +281,7 @@ Telegram/WhatsApp message
 | Cost for 50 users | ~$65-110/month (~$1.30-2.20/person) |
 | vs ChatGPT Plus (50 users) | $1,000/month |
 
-**[→ Full Multi-Tenant Guide](README_AGENTCORE.md)** · **[→ Roadmap](ROADMAP.md)**
+**[→ Full Multi-Tenant Guide](README_ENTERPRISE.md)** · **[→ Roadmap](ROADMAP.md)**
 
 ### 🏢 Enterprise Digital Workforce Platform — [enterprise/](enterprise/)
 
@@ -320,7 +321,7 @@ Built on top of the Multi-Tenant AgentCore Runtime, the Enterprise platform adds
 | 26 skills | Role-filtered with `allowedRoles`/`blockedRoles` manifests |
 | Sample org | 20 employees, 20 agents, 13 departments — seed scripts included |
 
-**[→ Enterprise Platform Guide](enterprise/README.md)** · **[→ Enterprise Roadmap](enterprise/ROADMAP.md)**
+**[→ Enterprise Platform Guide](README_ENTERPRISE.md)** · **[→ Enterprise Roadmap](enterprise/ROADMAP.md)**
 
 ### macOS (Apple Silicon) — For iOS/macOS Development
 
@@ -346,7 +347,7 @@ Uses SiliconFlow (DeepSeek, Qwen, GLM) instead of Bedrock. Requires a SiliconFlo
 | **cn-north-1 (Beijing)** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://cn-north-1.console.amazonaws.cn/cloudformation/home?region=cn-north-1#/stacks/create/review?stackName=openclaw-china&templateURL=https://sharefile-jiade.s3.cn-northwest-1.amazonaws.com.cn/clawdbot-china.yaml) |
 | **cn-northwest-1 (Ningxia)** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://cn-northwest-1.console.amazonaws.cn/cloudformation/home?region=cn-northwest-1#/stacks/create/review?stackName=openclaw-china&templateURL=https://sharefile-jiade.s3.cn-northwest-1.amazonaws.com.cn/clawdbot-china.yaml) |
 
-**[→ China Deployment Guide (中国区部署指南)](DEPLOYMENT_CN.md)**
+**[→ China Deployment Guide (中国区部署指南)](docs/DEPLOYMENT_CHINA_REGION.md)**
 
 ---
 

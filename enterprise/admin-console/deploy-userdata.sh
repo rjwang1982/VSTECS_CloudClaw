@@ -14,45 +14,48 @@
 set -ex
 exec > /var/log/admin-console-setup.log 2>&1
 
-export DEBIAN_FRONTEND=noninteractive
+# =============================================================================
+# OpenClaw Enterprise Admin Console — User-Data Bootstrap
+#
+# NOTE: This script is for reference / manual deployment on the EC2 instance.
+# deploy.sh does NOT run this automatically — you must execute Steps 4-5
+# from the README after deploy.sh completes.
+#
+# For Ubuntu 24.04 (default AMI in CFN template):
+#   - Uses python3 (3.12 pre-installed)
+#   - Requires python3.12-venv (not installed by default)
+#   - boto3/botocore must be upgraded for bedrock-agentcore API support
+#
+# For Amazon Linux 2023:
+#   - Replace apt-get with yum
+#   - python3.12-venv is not needed (venv works out of the box)
+# =============================================================================
 
-# ---- Signal helpers (CloudFormation WaitCondition) ----
-signal_success() {
-  curl -X PUT -H "Content-Type:" \
-    --data-binary '{"Status":"SUCCESS","Reason":"Setup complete","UniqueId":"setup","Data":"OK"}' \
-    "$WAIT_HANDLE"
-}
-signal_failure() {
-  curl -X PUT -H "Content-Type:" \
-    --data-binary "{\"Status\":\"FAILURE\",\"Reason\":\"$1\",\"UniqueId\":\"setup\",\"Data\":\"FAILED\"}" \
-    "$WAIT_HANDLE"
-  exit 1
-}
+# Install dependencies (Ubuntu 24.04)
+apt-get update -qq
+apt-get install -y python3.12-venv
+pip3 install --break-system-packages --upgrade boto3 botocore
 
-# ---- 1. System packages ----
-apt-get update -y
-apt-get install -y python3-pip python3-venv git unzip curl jq \
-  || signal_failure "apt-get failed"
-
-# ---- 2. Node.js 22 (LTS) ----
-curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-apt-get install -y nodejs || signal_failure "Node.js install failed"
-
-# ---- 3. Clone repository ----
+# Clone repo
 cd /home/ubuntu
-git clone --depth 1 \
-  https://github.com/jiade-dev/sample-openclaw-on-AWS-with-Bedrock.git app \
-  || signal_failure "git clone failed"
+git clone https://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock.git app
 cd app/enterprise/admin-console
 
 # ---- 4. Build frontend (React 19 + Vite 6) ----
 npm install --production=false || signal_failure "npm install failed"
 npx vite build || signal_failure "vite build failed"
 
-# ---- 5. Install Python dependencies ----
+# Seed data — IMPORTANT: set DYNAMODB_REGION to match where your table lives.
+# deploy.sh creates the table in DYNAMODB_REGION from .env (default: us-east-2).
+# If you created it in us-east-1 (same region as the stack), change these accordingly.
 cd server
-pip3 install --break-system-packages --ignore-installed -r requirements.txt \
-  || signal_failure "pip install failed"
+DYNAMODB_REGION="${DYNAMODB_REGION:-us-east-1}"
+AWS_REGION="$DYNAMODB_REGION" python3 seed_dynamodb.py --region "$DYNAMODB_REGION"
+AWS_REGION="$DYNAMODB_REGION" python3 seed_roles.py --region "$DYNAMODB_REGION"
+AWS_REGION="$DYNAMODB_REGION" python3 seed_audit_approvals.py --region "$DYNAMODB_REGION"
+AWS_REGION="$DYNAMODB_REGION" python3 seed_settings.py --region "$DYNAMODB_REGION"
+AWS_REGION="$DYNAMODB_REGION" python3 seed_knowledge.py --region "$DYNAMODB_REGION"
+AWS_REGION="$DYNAMODB_REGION" python3 seed_ssm_tenants.py --region "${SSM_REGION:-us-east-1}" --stack "${STACK_NAME:-openclaw-enterprise}"
 
 # ---- 6. Seed DynamoDB demo data (optional) ----
 if [ "$SEED_DATA" = "true" ]; then
@@ -84,13 +87,9 @@ After=network.target
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/app/enterprise/admin-console/server
-Environment=AWS_REGION=${AWS_REGION}
-Environment=DYNAMODB_TABLE=${DYNAMODB_TABLE}
-Environment=S3_BUCKET=${S3_BUCKET}
+EnvironmentFile=-/etc/openclaw/env
 Environment=CONSOLE_PORT=8099
-Environment=ADMIN_PASSWORD=${ADMIN_PASSWORD}
-Environment=BEDROCK_MODEL=${BEDROCK_MODEL}
-ExecStart=/usr/bin/python3 main.py
+ExecStart=/opt/admin-venv/bin/python main.py
 Restart=always
 RestartSec=5
 
@@ -98,6 +97,7 @@ RestartSec=5
 WantedBy=multi-user.target
 SVCEOF
 
+chown -R ubuntu:ubuntu /home/ubuntu/app
 systemctl daemon-reload
 systemctl enable openclaw-admin
 systemctl start openclaw-admin

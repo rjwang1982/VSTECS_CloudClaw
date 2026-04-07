@@ -78,10 +78,26 @@ echo "$BASE_TENANT_ID" > /tmp/base_tenant_id
 # =============================================================================
 OPENCLAW_CONFIG_DIR="$HOME/.openclaw"
 mkdir -p "$OPENCLAW_CONFIG_DIR"
+
+# Generate a random gateway token for this container instance
+# This token is stored in SSM so the admin console proxy can inject it
+GATEWAY_TOKEN=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+export OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN"
+
 sed -e "s|\${AWS_REGION}|${AWS_REGION}|g" \
     -e "s|\${BEDROCK_MODEL_ID}|${BEDROCK_MODEL_ID:-global.amazon.nova-2-lite-v1:0}|g" \
     /app/openclaw.json > "$OPENCLAW_CONFIG_DIR/openclaw.json"
 echo "[entrypoint] openclaw.json written to $OPENCLAW_CONFIG_DIR/openclaw.json"
+
+# Store gateway token in SSM so admin console proxy can authenticate
+if [ -n "${SHARED_AGENT_ID:-}" ]; then
+    aws ssm put-parameter \
+        --name "/openclaw/${STACK_NAME}/always-on/${SHARED_AGENT_ID}/gateway-token" \
+        --value "$GATEWAY_TOKEN" --type "SecureString" --overwrite \
+        --region "$AWS_REGION" 2>/dev/null \
+        && echo "[entrypoint] Gateway token stored in SSM for ${SHARED_AGENT_ID}" \
+        || echo "[entrypoint] WARNING: Gateway token SSM write failed"
+fi
 
 # =============================================================================
 # Step 0.55: Synchronous workspace assembly for always-on containers
@@ -150,14 +166,52 @@ openclaw gateway --port 18789 > /tmp/openclaw-gateway.log 2>&1 &
 GATEWAY_PID=$!
 echo "[entrypoint] OpenClaw Gateway PID=${GATEWAY_PID}"
 
-# Wait up to 20s for Gateway to start listening (V8 cache makes this ~2-3s)
-for i in $(seq 1 20); do
-    if ss -tlnp 2>/dev/null | grep -q ":18789"; then
+# Wait up to 30s for Gateway to start listening
+# Use curl instead of ss (ss may not exist in slim images)
+GATEWAY_READY=false
+for i in $(seq 1 30); do
+    if curl -sf --connect-timeout 1 http://127.0.0.1:18789/__openclaw/control-ui-config.json >/dev/null 2>&1; then
         echo "[entrypoint] Gateway ready on port 18789 (${i}s)"
+        GATEWAY_READY=true
         break
     fi
     sleep 1
 done
+if [ "$GATEWAY_READY" = "false" ]; then
+    echo "[entrypoint] WARNING: Gateway not ready after 30s (may still be starting)"
+fi
+
+# Auto-pair Control UI and store the dashboard URL token in SSM.
+# `openclaw dashboard --no-open` outputs a URL with #token=xxx which is the
+# one-time pairing token. We extract and store it so the admin console can
+# construct the full URL for the employee.
+# Determine the agent ID for SSM key (shared or personal always-on)
+_AGENT_SSM_ID="${SHARED_AGENT_ID:-}"
+if [ -z "$_AGENT_SSM_ID" ] && [ "$EFS_MODE" = "true" ]; then
+    # Personal always-on: derive from ECS service name or tenant_id
+    # The admin console writes SSM key as agent-exec-{name} or agent-{pos}-{emp}
+    _AGENT_SSM_ID=$(echo "$TENANT_ID" | sed -n 's/personal__//p')
+    # Try to read from SSM (admin console stores: tenants/{emp}/always-on-agent → agent-id)
+    if [ -n "$_AGENT_SSM_ID" ]; then
+        _LOOKED_UP=$(aws ssm get-parameter --name "/openclaw/${STACK_NAME}/tenants/${_AGENT_SSM_ID}/always-on-agent" \
+            --query Parameter.Value --output text --region "$AWS_REGION" 2>/dev/null || true)
+        [ -n "$_LOOKED_UP" ] && _AGENT_SSM_ID="$_LOOKED_UP"
+    fi
+fi
+if [ "$GATEWAY_READY" = "true" ] && [ -n "$_AGENT_SSM_ID" ]; then
+    DASHBOARD_OUTPUT=$(timeout 10 openclaw dashboard --no-open 2>&1 || true)
+    DASHBOARD_TOKEN=$(echo "$DASHBOARD_OUTPUT" | sed -n 's/.*#token=\([a-f0-9]*\).*/\1/p' | head -1)
+    if [ -n "$DASHBOARD_TOKEN" ]; then
+        aws ssm put-parameter \
+            --name "/openclaw/${STACK_NAME}/always-on/${_AGENT_SSM_ID}/dashboard-token" \
+            --value "$DASHBOARD_TOKEN" --type "String" --overwrite \
+            --region "$AWS_REGION" 2>/dev/null \
+            && echo "[entrypoint] Dashboard pairing token stored in SSM" \
+            || echo "[entrypoint] WARNING: Dashboard token SSM write failed"
+    else
+        echo "[entrypoint] No dashboard token extracted (non-fatal)"
+    fi
+fi
 
 # =============================================================================
 # Step 1: Start server.py IMMEDIATELY — health check must respond in seconds
@@ -276,6 +330,14 @@ echo "[entrypoint] Background sync PID=${BG_PID}"
 cleanup() {
     echo "[entrypoint] SIGTERM — flushing workspace"
 
+    # Step 0: Deregister SSM endpoint so Tenant Router stops routing to this container
+    if [ -n "${SHARED_AGENT_ID:-}" ]; then
+        aws ssm delete-parameter \
+            --name "/openclaw/${STACK_NAME}/always-on/${SHARED_AGENT_ID}/endpoint" \
+            --region "$AWS_REGION" 2>/dev/null || true
+        echo "[entrypoint] SSM endpoint deregistered for ${SHARED_AGENT_ID}"
+    fi
+
     # Step 1: Stop server first — no new requests during shutdown
     kill "$SERVER_PID" 2>/dev/null || true
 
@@ -306,11 +368,11 @@ cleanup() {
         if [ "$EFS_MODE" = "true" ]; then
             # EFS → S3 snapshot: only memory + MEMORY.md (other files already in S3 from bootstrap)
             echo "[entrypoint] EFS → S3 cross-mode snapshot..."
-            aws s3 sync "$WORKSPACE/memory/" "${SYNC_TARGET}memory/" \
+            timeout 15 aws s3 sync "$WORKSPACE/memory/" "${SYNC_TARGET}memory/" \
                 --region "$AWS_REGION" --quiet 2>/dev/null || true
-            aws s3 cp "$WORKSPACE/MEMORY.md" "${SYNC_TARGET}MEMORY.md" \
+            timeout 10 aws s3 cp "$WORKSPACE/MEMORY.md" "${SYNC_TARGET}MEMORY.md" \
                 --region "$AWS_REGION" --quiet 2>/dev/null || true
-            aws s3 cp "$WORKSPACE/HEARTBEAT.md" "${SYNC_TARGET}HEARTBEAT.md" \
+            timeout 10 aws s3 cp "$WORKSPACE/HEARTBEAT.md" "${SYNC_TARGET}HEARTBEAT.md" \
                 --region "$AWS_REGION" --quiet 2>/dev/null || true
         else
             # Standard S3 mode: full sync
@@ -344,16 +406,28 @@ if [ -n "${SHARED_AGENT_ID:-}" ] && [ -n "${ECS_CONTAINER_METADATA_URI_V4:-}" ];
         sleep 1
     done
     # Get this task's private IP from ECS metadata v4
-    TASK_IP=$(curl -sf "${ECS_CONTAINER_METADATA_URI_V4}" 2>/dev/null \
-        | python3 -c "
+    # Try task-level endpoint first (/task), then container-level as fallback.
+    # The task endpoint has the ENI details with the private IP.
+    TASK_IP=""
+    for META_URL in "${ECS_CONTAINER_METADATA_URI_V4}/task" "${ECS_CONTAINER_METADATA_URI_V4}"; do
+        TASK_IP=$(curl -sf "$META_URL" 2>/dev/null \
+            | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
-    nets = data.get('Networks', [])
-    print(nets[0].get('IPv4Addresses', [''])[0] if nets else '')
+    # Task-level: Containers[].Networks[].IPv4Addresses[]
+    for c in data.get('Containers', [data]):
+        for n in c.get('Networks', []):
+            addrs = n.get('IPv4Addresses', [])
+            if addrs:
+                print(addrs[0])
+                sys.exit(0)
+    print('')
 except Exception:
     print('')
 " 2>/dev/null || echo "")
+        if [ -n "$TASK_IP" ]; then break; fi
+    done
     if [ -n "$TASK_IP" ]; then
         ENDPOINT="http://${TASK_IP}:8080"
         aws ssm put-parameter \
