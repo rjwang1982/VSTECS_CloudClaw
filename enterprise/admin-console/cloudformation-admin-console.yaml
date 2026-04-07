@@ -564,6 +564,7 @@ Resources:
           Environment=ADMIN_PASSWORD=${AdminPassword}
           Environment=BEDROCK_MODEL=${BedrockModel}
           Environment=JWT_SECRET=$JWT_SECRET
+          Environment=SEED_DEMO_DATA=${SeedDemoData}
           ExecStart=/usr/bin/python3 main.py
           Restart=always
           RestartSec=5
