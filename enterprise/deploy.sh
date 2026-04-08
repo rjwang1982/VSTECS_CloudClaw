@@ -125,8 +125,10 @@ fi
 success "AWS CLI $CLI_VERSION"
 
 # Validate Bedrock model access (non-blocking warning)
+# Strip "global." or "us." prefix for the API call (cross-region inference IDs aren't queryable directly)
+_CHECK_MODEL=$(echo "$MODEL" | sed 's/^global\.\|^us\.//')
 info "  Checking Bedrock model access for $MODEL..."
-if aws bedrock get-foundation-model --model-identifier "$MODEL" --region "$REGION" \
+if aws bedrock get-foundation-model --model-identifier "$_CHECK_MODEL" --region "$REGION" \
     --query 'modelDetails.modelId' --output text &>/dev/null; then
   success "  Model $MODEL accessible"
 else
