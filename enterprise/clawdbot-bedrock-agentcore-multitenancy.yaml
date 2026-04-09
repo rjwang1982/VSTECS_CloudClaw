@@ -817,7 +817,7 @@ Resources:
             "models": {
               "providers": {
                 "amazon-bedrock": {
-                  "baseUrl": "https://bedrock-runtime.REGION_PLACEHOLDER.amazonaws.com",
+                  "baseUrl": "http://localhost:8091",
                   "api": "bedrock-converse-stream",
                   "auth": "aws-sdk",
                   "models": [
