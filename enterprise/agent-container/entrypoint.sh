@@ -237,17 +237,13 @@ echo "[entrypoint] server.py PID=${SERVER_PID}"
         echo "[bg] Shared agent detected: $SHARED_AGENT_ID"
     fi
 
-    # Read tenant's position from SSM (for workspace assembly)
-    TENANT_POSITION=$(aws ssm get-parameter \
-        --name "/openclaw/${STACK_NAME}/tenants/${TENANT_ID}/position" \
-        --query Parameter.Value --output text --region "$AWS_REGION" 2>/dev/null || echo "")
+    # Position is resolved from DynamoDB by workspace_assembler.py below.
+    # No SSM reads needed — all tenant data is in DynamoDB.
+    TENANT_POSITION=""
 
-    # Initialize SOUL.md for new tenants
+    # Initialize SOUL.md for new tenants (workspace_assembler will overwrite with merged SOUL)
     if [ ! -f "$WORKSPACE/SOUL.md" ]; then
-        ROLE=$(aws ssm get-parameter \
-            --name "/openclaw/${STACK_NAME}/tenants/${TENANT_ID}/soul-template" \
-            --query Parameter.Value --output text --region "$AWS_REGION" 2>/dev/null || echo "default")
-        aws s3 cp "s3://${S3_BUCKET}/_shared/templates/${ROLE}.md" "$WORKSPACE/SOUL.md" \
+        aws s3 cp "s3://${S3_BUCKET}/_shared/templates/default.md" "$WORKSPACE/SOUL.md" \
             --quiet 2>/dev/null || echo "You are a helpful AI assistant." > "$WORKSPACE/SOUL.md"
     fi
 
