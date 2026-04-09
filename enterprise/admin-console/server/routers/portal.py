@@ -87,52 +87,8 @@ class PortalRequestCreate(BaseModel):
     reason: str = ""
 
 
-# ── Local helper: run openclaw channels CLI ──────────────────────────────
-def _run_openclaw_channels() -> list:
-    """Get live channel status from openclaw channels list CLI."""
-    import subprocess as _sp
-    openclaw_bin = "/home/ubuntu/.nvm/versions/node/v22.22.1/bin/openclaw"
-    env_path = "/home/ubuntu/.nvm/versions/node/v22.22.1/bin:/usr/local/bin:/usr/bin:/bin"
-    try:
-        result = _sp.run(
-            ["sudo", "-u", "ubuntu", "env", f"PATH={env_path}", "HOME=/home/ubuntu",
-             openclaw_bin, "channels", "list", "--json"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.stdout:
-            raw = json.loads(result.stdout)
-            channels = []
-            for ch_type, accounts in raw.get("chat", {}).items():
-                for account in accounts:
-                    channels.append({"channel": ch_type, "account": account, "type": "chat"})
-            return channels
-    except Exception:
-        pass
-    # Fallback: parse openclaw channels list text output
-    try:
-        result = _sp.run(
-            ["sudo", "-u", "ubuntu", "env", f"PATH={env_path}", "HOME=/home/ubuntu",
-             openclaw_bin, "channels", "list"],
-            capture_output=True, text=True, timeout=10,
-        )
-        channels = []
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if line.startswith("- ") and "default" in line:
-                parts = line[2:].split()
-                ch_type = parts[0].lower() if parts else "unknown"
-                configured = "configured" in line
-                linked = "not linked" not in line
-                channels.append({
-                    "channel": ch_type,
-                    "account": "default",
-                    "configured": configured,
-                    "linked": linked,
-                    "raw": line,
-                })
-        return channels
-    except Exception:
-        return []
+# Reuse the shared channel-list helper from admin_im (single implementation).
+from routers.admin_im import _run_openclaw_channels
 
 
 # ── Helper: find channel user id (reverse lookup) ───────────────────────

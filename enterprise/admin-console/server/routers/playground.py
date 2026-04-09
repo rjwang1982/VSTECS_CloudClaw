@@ -90,8 +90,9 @@ def _admin_assistant_direct(message: str) -> dict:
                "planA": "Full IT Admin access (read-only safety)",
                "planE": "Block credential exposure"}
 
-    openclaw_bin = "/home/ubuntu/.nvm/versions/node/v22.22.1/bin/openclaw"
-    env_path = "/home/ubuntu/.nvm/versions/node/v22.22.1/bin:/usr/local/bin:/usr/bin:/bin"
+    from routers.openclaw_cli import find_openclaw_bin, openclaw_env_path
+    openclaw_bin = find_openclaw_bin()
+    env_path = openclaw_env_path()
 
     try:
         import time as _admin_t

@@ -297,10 +297,9 @@ def approve_pairing(body: PairingApproveRequest, authorization: str = Header(def
     require_role(authorization, roles=["admin"])
 
     # 1. Run openclaw pairing approve
-    openclaw_bin = "/home/ubuntu/.nvm/versions/node/v22.22.1/bin/openclaw"
-    env = os.environ.copy()
-    env["PATH"] = "/home/ubuntu/.nvm/versions/node/v22.22.1/bin:" + env.get("PATH", "")
-    env["HOME"] = "/home/ubuntu"
+    from routers.openclaw_cli import find_openclaw_bin, openclaw_env
+    openclaw_bin = find_openclaw_bin()
+    env = openclaw_env()
 
     try:
         result = subprocess.run(

@@ -27,26 +27,12 @@ def _mapping_prefix():
     return f"/openclaw/{stack}/user-mapping/"
 
 
-def _find_openclaw_bin() -> str:
-    """Find the openclaw binary regardless of Node.js version."""
-    import glob
-    patterns = [
-        "/home/ubuntu/.nvm/versions/node/*/bin/openclaw",
-        "/usr/local/bin/openclaw",
-        "/usr/bin/openclaw",
-    ]
-    for pattern in patterns:
-        matches = glob.glob(pattern)
-        if matches:
-            return matches[0]
-    return "openclaw"  # fallback to PATH lookup
-
-
 def _run_openclaw_channels() -> list:
     """Get live channel status from openclaw channels list CLI."""
     import subprocess as _sp
-    openclaw_bin = _find_openclaw_bin()
-    env_path = os.path.dirname(openclaw_bin) + ":/usr/local/bin:/usr/bin:/bin"
+    from routers.openclaw_cli import find_openclaw_bin, openclaw_env_path, parse_openclaw_json
+    openclaw_bin = find_openclaw_bin()
+    env_path = openclaw_env_path()
     try:
         result = _sp.run(
             ["sudo", "-u", "ubuntu", "env", f"PATH={env_path}", "HOME=/home/ubuntu",
@@ -54,11 +40,8 @@ def _run_openclaw_channels() -> list:
             capture_output=True, text=True, timeout=15,
         )
         if result.stdout:
-            # openclaw prints plugin registration logs before JSON — find the first '{'
-            stdout = result.stdout
-            json_start = stdout.find('{')
-            if json_start >= 0:
-                raw = json.loads(stdout[json_start:])
+            raw = parse_openclaw_json(result.stdout)
+            if raw:
                 channels = []
                 for ch_type, accounts in raw.get("chat", {}).items():
                     for account in accounts:
@@ -278,22 +261,18 @@ def test_im_channel(channel: str, authorization: str = Header(default="")):
     require_role(authorization, roles=["admin"])
     try:
         import subprocess as _sp
-        openclaw_bin = _find_openclaw_bin()
-        env_path = os.path.dirname(openclaw_bin) + ":/usr/local/bin:/usr/bin:/bin"
+        from routers.openclaw_cli import find_openclaw_bin, openclaw_env_path, parse_openclaw_json
+        openclaw_bin = find_openclaw_bin()
+        env_path = openclaw_env_path()
         result = _sp.run(
             ["sudo", "-u", "ubuntu", "env", f"PATH={env_path}", "HOME=/home/ubuntu",
              openclaw_bin, "channels", "list", "--json"],
             capture_output=True, text=True, timeout=15,
         )
         if result.stdout:
-            import json as _json
-            # openclaw prints plugin registration logs (with ANSI codes) before the JSON blob.
-            # Find the first '{' to skip the preamble, same pattern used in server.py.
-            stdout = result.stdout
-            json_start = stdout.find('{')
-            if json_start == -1:
+            raw = parse_openclaw_json(result.stdout)
+            if not raw:
                 return {"ok": False, "error": "Unexpected openclaw output — no JSON found."}
-            raw = _json.loads(stdout[json_start:])
             configured = raw.get("chat", {})
             # channel name in openclaw may differ: "feishu" -> "feishu", "discord" -> "discord"
             channel_key = channel.lower()

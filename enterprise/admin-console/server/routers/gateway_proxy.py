@@ -310,17 +310,16 @@ def approve_gateway_pairing(authorization: str = Header(default="")):
     base_url, gw_token = result
     # Build WebSocket URL for the Gateway (port 18789)
     ws_url = base_url.replace("http://", "ws://")
+    from routers.openclaw_cli import find_openclaw_bin, openclaw_env
     cmd = [
-        "/home/ubuntu/.nvm/versions/node/v22.22.1/bin/openclaw",
+        find_openclaw_bin(),
         "devices", "approve", "--latest", "--json",
         "--url", ws_url,
     ]
     if gw_token:
         cmd.extend(["--token", gw_token])
     try:
-        env = os.environ.copy()
-        env["PATH"] = "/home/ubuntu/.nvm/versions/node/v22.22.1/bin:" + env.get("PATH", "")
-        env["HOME"] = "/home/ubuntu"
+        env = openclaw_env()
         # Allow plaintext WS to private VPC IP (Fargate container in same VPC)
         env["OPENCLAW_ALLOW_INSECURE_PRIVATE_WS"] = "1"
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15, env=env)
