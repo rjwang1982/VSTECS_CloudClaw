@@ -692,7 +692,8 @@ server.on('stream', (stream, headers) => {
       const msgTrim = userText.trim();
 
       // ── Step 2a: BIND confirmation (not YES/NO to avoid intercepting normal conversation) ──
-      if (/^(bind|BIND|Bind|绑定确认)$/.test(msgTrim) && pendingPairings.has(pendingKey)) {
+      // Use \b word boundary instead of ^$ because Gateway wraps user text in metadata
+      if (/\b(BIND|bind|Bind|绑定确认)\b/.test(userText) && pendingPairings.has(pendingKey)) {
         const pending = pendingPairings.get(pendingKey);
         if (Date.now() > pending.expiresAt) {
           pendingPairings.delete(pendingKey);
@@ -718,7 +719,7 @@ server.on('stream', (stream, headers) => {
       }
 
       // ── Step 2b: CANCEL ────────────────────────────────────────────────
-      if (/^(cancel|CANCEL|Cancel|取消绑定)$/.test(msgTrim) && pendingPairings.has(pendingKey)) {
+      if (/\b(CANCEL|cancel|Cancel|取消绑定)\b/.test(userText) && pendingPairings.has(pendingKey)) {
         pendingPairings.delete(pendingKey);
         injectResponse('Binding cancelled. To reconnect, go to the Employee Portal and generate a new QR code.');
         return;
