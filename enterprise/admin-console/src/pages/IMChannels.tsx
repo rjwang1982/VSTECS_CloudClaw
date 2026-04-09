@@ -134,9 +134,10 @@ function ConnectionRowAction({ onRevoke, revoking }: {
   );
 }
 
-function ChannelConnections({ channel, connections, channelStatus, onRevoke }: {
+function ChannelConnections({ channel, connections, channelStatus, onRevoke, instanceId, region }: {
   channel: string; connections: ChannelConnection[];
   channelStatus?: IMChannel; onRevoke: (channelUserId: string) => void;
+  instanceId: string; region: string;
 }) {
   const qc = useQueryClient();
   const [testResult, setTestResult] = useState<{ ok: boolean; botName?: string; error?: string } | null>(null);
@@ -484,6 +485,8 @@ export default function IMChannels() {
             connections={connections[activeChannel] || []}
             channelStatus={channelStatusMap[activeChannel]}
             onRevoke={() => {}}
+            instanceId={instanceId}
+            region={region}
           />
         )}
       </div>
