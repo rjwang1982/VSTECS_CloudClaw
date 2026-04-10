@@ -33,8 +33,8 @@ Edit `.env` — only 3 values are required:
 
 | Variable | Required | Default | Notes |
 |----------|----------|---------|-------|
-| `STACK_NAME` | Yes | `openclaw-enterprise` | Names all resources. Must be unique per account/region. |
-| `REGION` | Yes | `us-east-1` | Must be us-east-1 or us-west-2 (AgentCore availability). |
+| `STACK_NAME` | Yes | `openclaw` | Names all resources. Must be unique per account/region. |
+| `REGION` | Yes | `us-east-1` | Any region with Bedrock + AgentCore (us-east-1, us-west-2, ap-northeast-1, etc.). |
 | `ADMIN_PASSWORD` | Yes | — | Shared login password for all admin accounts. |
 | `MODEL` | No | `global.amazon.nova-2-lite-v1:0` | Bedrock model ID. |
 | `INSTANCE_TYPE` | No | `c7g.large` | `t4g.small` for testing, `c7g.large` for production. |
@@ -58,7 +58,7 @@ The script runs 8 steps (~30 minutes total):
 | 3/8 Docker Build | Builds agent container on EC2, pushes to ECR | 15 min |
 | 4/8 AgentCore Runtime | Creates Bedrock AgentCore Runtime | 30s |
 | 5/8 S3 Upload | Uploads SOUL templates + knowledge docs | 10s |
-| 6/8 DynamoDB Seed | Creates table, seeds org data (27 employees, 10 positions) | 30s |
+| 6/8 DynamoDB Seed | Creates table, seeds org data (20 employees, 10 positions) | 30s |
 | 7/8 Secrets | Stores admin password + JWT secret in SSM | 20s |
 | 8/8 EC2 Services | Builds frontend, installs services, starts systemd | 5 min |
 
@@ -98,7 +98,8 @@ aws ssm start-session --target <INSTANCE_ID> --region <REGION>
 
 ```bash
 # All 4 services should be "active"
-systemctl is-active openclaw-admin tenant-router bedrock-proxy-h2 openclaw-gateway
+systemctl is-active openclaw-admin tenant-router bedrock-proxy-h2
+sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active openclaw-gateway
 
 # All 4 ports should be listening
 ss -tlnp | grep -E '8090|8091|8099|18789'
@@ -231,6 +232,8 @@ openclaw channels list
 ```
 
 Each platform has its own token/credential format. Full channel setup docs: https://docs.openclaw.ai/channels
+
+**Important:** When configuring DM access mode, select **"Open"** (not "Pairing"). The enterprise platform uses H2 Proxy for identity verification — Gateway-level pairing is unnecessary and will block employees.
 
 #### Step 3: Verify in Admin Console
 
