@@ -335,8 +335,68 @@ arch: {
   }
 },
 
+deploy: {
+  en: { title:'Deploy with deploy.sh', sub:'One-command deployment: 8 automated steps, ~15 minutes, zero manual intervention.' },
+  zh: { title:'使用 deploy.sh 部署', sub:'一键部署：8 个自动化步骤，约 15 分钟，零手动干预。' },
+  body() {
+    return intent(
+      t(
+        '<strong>Why one-command deployment?</strong> Enterprise customers need <strong>repeatability</strong>: the same script must produce identical results whether run by a senior architect or a first-day ops engineer. Manual multi-step deployments introduce human error — a typo in a DynamoDB table name, a forgotten IAM policy, a misconfigured VPC endpoint. <code>deploy.sh</code> encapsulates 8 complex AWS operations into one <strong>idempotent</strong> script. Re-running is always safe: it detects existing resources and updates only what changed. <strong>Security value:</strong> secrets (admin password, JWT key) are generated at deploy time and stored in SSM SecureString — never written to disk or committed to git. <strong>Operational value:</strong> the script validates prerequisites before creating any resources (AWS CLI version, Bedrock model access), preventing half-deployed stacks.',
+        '<strong>为什么一键部署？</strong>企业客户需要<strong>可重复性</strong>：同一脚本无论高级架构师还是入职第一天的运维执行都必须产生相同结果。手动多步部署引入人为错误——DynamoDB 表名拼写错误、遗忘 IAM 策略、VPC 端点配置错误。<code>deploy.sh</code> 将 8 个复杂 AWS 操作封装为一个<strong>幂等</strong>脚本。重复运行始终安全：检测已有资源，只更新变化部分。<strong>安全价值：</strong>密钥（admin 密码、JWT 密钥）在部署时生成并存储在 SSM SecureString——永不写入磁盘或提交到 git。<strong>运维价值：</strong>脚本在创建任何资源之前验证前置条件（AWS CLI 版本、Bedrock 模型访问），防止半部署的 stack。'
+      )
+    )
+    + sectionHead(t('Prerequisites','前置条件'))
+    + '<table class="tbl"><tr><th>'+t('Requirement','要求')+'</th><th>'+t('Check','检查')+'</th><th>'+t('Min Version','最低版本')+'</th></tr>'
+    + '<tr><td>AWS CLI</td><td><code>aws --version</code></td><td>>= 2.27 (AgentCore API)</td></tr>'
+    + '<tr><td>Python</td><td><code>python3 --version</code></td><td>>= 3.10</td></tr>'
+    + '<tr><td>SSM Plugin</td><td><code>session-manager-plugin</code></td><td>'+t('Latest','最新')+'</td></tr>'
+    + '<tr><td>'+t('AWS Credentials','AWS 凭证')+'</td><td><code>aws sts get-caller-identity</code></td><td>'+t('Must succeed','必须成功')+'</td></tr></table>'
+    + sectionHead(t('Quick Start','快速开始'))
+    + '<div class="code">cd enterprise\ncp .env.example .env\n# '+t('Edit: STACK_NAME, REGION, ADMIN_PASSWORD','编辑：STACK_NAME, REGION, ADMIN_PASSWORD')+'\nbash deploy.sh</div>'
+    + sectionHead(t('.env Configuration','.env 配置'))
+    + '<table class="tbl"><tr><th>'+t('Variable','变量')+'</th><th>'+t('Required','必填')+'</th><th>'+t('Default','默认')+'</th><th>'+t('Notes','说明')+'</th></tr>'
+    + '<tr><td><code>STACK_NAME</code></td><td>✅</td><td>openclaw</td><td>'+t('Names ALL resources. Unique per account/region.','命名所有资源。每账号/区域唯一。')+'</td></tr>'
+    + '<tr><td><code>REGION</code></td><td>✅</td><td>us-east-1</td><td>'+t('Must have Bedrock + AgentCore','必须有 Bedrock + AgentCore')+'</td></tr>'
+    + '<tr><td><code>ADMIN_PASSWORD</code></td><td>✅</td><td>—</td><td>'+t('Shared login password for all accounts','所有账户共享登录密码')+'</td></tr>'
+    + '<tr><td><code>MODEL</code></td><td></td><td>global.amazon.nova-2-lite-v1:0</td><td>Bedrock model ID</td></tr>'
+    + '<tr><td><code>INSTANCE_TYPE</code></td><td></td><td>c7g.large</td><td>Graviton ARM</td></tr>'
+    + '<tr><td><code>WORKSPACE_BUCKET_NAME</code></td><td></td><td>'+t('auto','自动')+'</td><td>'+t('Set if multi-stack same account','同账号多 stack 时设置')+'</td></tr></table>'
+    + sectionHead(t('8 Automated Steps','8 个自动化步骤'))
+    + card(t('deploy.sh Execution','deploy.sh 执行流程'),
+      [['1',t('Prerequisites','前置条件'),t('AWS CLI version + Bedrock model check','AWS CLI 版本 + Bedrock 模型检查'),'2s'],['2','CloudFormation',t('VPC, EC2, ECR, S3, IAM, ECS, EFS','VPC, EC2, ECR, S3, IAM, ECS, EFS'),'8 min'],['3','Docker Build',t('Agent container on EC2 → ECR push','EC2 构建 Agent 容器 → ECR 推送'),'10 min'],['4','AgentCore Runtime',t('Create runtime + pass env vars','创建运行时 + 传递环境变量'),'30s'],['5','S3 Templates',t('SOUL, skills, knowledge docs','SOUL、技能、知识文档'),'10s'],['6','DynamoDB Seed',t('20 employees, agents, bindings, roles, settings','20 员工、Agent、绑定、角色、设置'),'15s'],['7',t('Secrets + Env','密钥 + 环境'),t('SSM SecureString + /etc/openclaw/env','SSM SecureString + /etc/openclaw/env'),'10s'],['8','EC2 Services',t('Build React frontend + systemd services','构建 React 前端 + systemd 服务'),'2 min']].map(([n,name,desc,time])=>'<div style="display:flex;align-items:center;gap:10px;padding:5px 0;font-size:12px"><span style="background:var(--primary);color:#fff;width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0">'+n+'</span><span style="font-weight:600;min-width:120px">'+name+'</span><span style="color:var(--text-m);flex:1">'+desc+'</span><span class="badge green">'+time+'</span></div>').join('')
+    )
+    + sectionHead(t('Re-deploy Options','重新部署选项'))
+    + '<div class="code">bash deploy.sh --skip-build      # '+t('Skip Docker (use existing image)','跳过 Docker（用现有镜像）')+'\nbash deploy.sh --skip-seed       # '+t('Skip DynamoDB seeding','跳过 DynamoDB 种子')+'\nbash deploy.sh --skip-services   # '+t('Skip service deployment','跳过服务部署')+'</div>'
+    + sectionHead(t('Post-Deployment Verification','部署后验证'))
+    + '<div class="code"># '+t('Check services','检查服务')+'\nsystemctl is-active openclaw-admin tenant-router bedrock-proxy-h2\n\n# '+t('Check ports','检查端口')+'\nss -tlnp | grep -E \'8090|8091|8099|18789\'\n\n# '+t('Check data','检查数据')+'\ncurl -s http://localhost:8099/api/v1/org/employees | \\\n  python3 -c "import json,sys; print(f\'Employees: {len(json.load(sys.stdin))}\')"</div>'
+    + deep(
+      '<h4>deploy.sh Internal Architecture</h4><p>File: <code>enterprise/deploy.sh</code> (~620 lines). Key design decisions:</p><ul style="font-size:12px;color:var(--text-s);line-height:1.8"><li><strong>Docker builds on EC2, not locally:</strong> Source tarball → S3 → EC2 pulls → builds ARM image → ECR push. You don\'t need Docker installed. The build uses the same Graviton ARM64 architecture as production.</li><li><strong>AgentCore Runtime env vars (Step 4):</strong> STACK_NAME, AWS_REGION, S3_BUCKET, DYNAMODB_TABLE, DYNAMODB_REGION, BEDROCK_MODEL_ID passed via <code>--environment-variables</code> flag. This is the ONLY way to configure the container — no .env file inside the image.</li><li><strong>ec2-setup.sh (Step 8):</strong> The critical final step. Builds React frontend (npm install + vite build), installs 3 systemd services, and injects <code>AWS_ENDPOINT_URL_BEDROCK_RUNTIME=http://localhost:8091</code> into Gateway service — connecting Gateway to H2 Proxy for multi-tenant routing.</li></ul><h4>CloudFormation Resources</h4><div class="code">VPC + Public Subnet + Internet Gateway + Route Table\nEC2 Instance (c7g.large Graviton, Ubuntu 24.04, SSM-managed)\nECR Repository (Docker image storage)\nS3 Bucket (versioned, for workspaces/SOUL/skills/knowledge)\nIAM Roles: EC2 instance role (SSM + S3 + DynamoDB + Bedrock)\n           AgentCore execution role (ECR + S3 + DynamoDB + Bedrock + CloudWatch)\nECS Cluster + Task Definition + Security Group (for Always-on agents)\nEFS File System + Mount Target (persistent storage for Always-on)\nCloudWatch Log Groups (agent + admin logs)</div><h4>⚠️ Self-Audit: Deployment Gotchas</h4><ul style="font-size:12px;color:var(--text-s);line-height:1.8"><li><strong>First deploy on new account may fail (ECS service linked role):</strong> New AWS accounts need ~30s for ECS role propagation. First CFN create may fail with "Unable to assume service linked role." Fix: wait, re-run. Second attempt always succeeds.</li><li><strong>S3 bucket name conflict (multi-region):</strong> Default name is <code>openclaw-tenants-{ACCOUNT_ID}</code>. Same account, two regions → conflict. Must set WORKSPACE_BUCKET_NAME.</li><li><strong>seed scripts need import os:</strong> After batch-replacing hardcoded defaults with <code>os.environ.get()</code>, all seed scripts must have <code>import os</code>. Missing this causes silent seed failure — DynamoDB table created but empty (no employees, no roles).</li><li><strong>JWT_SECRET regenerates on each deploy.sh run:</strong> Not stored in .env — generated fresh with <code>openssl rand -hex 32</code>. Re-deploying with --skip-seed still writes new JWT_SECRET to SSM, invalidating existing tokens. Employees must re-login.</li><li><strong>Docker image must be rebuilt after agent-container code changes:</strong> workspace_assembler.py, server.py, permissions.py are baked into the image. Code changes on EC2 admin-console don\'t affect the container — must rebuild with <code>deploy.sh --skip-seed</code>.</li></ul>',
+      '<h4>deploy.sh 内部架构</h4><p>文件：<code>enterprise/deploy.sh</code>（约 620 行）。关键设计：</p><ul style="font-size:12px;color:var(--text-s);line-height:1.8"><li><strong>Docker 在 EC2 构建，非本地：</strong>源码打包 → S3 → EC2 拉取 → 构建 ARM 镜像 → ECR 推送。无需本地 Docker。</li><li><strong>AgentCore Runtime 环境变量（步骤 4）：</strong>通过 <code>--environment-variables</code> 传递。这是配置容器的唯一方式。</li><li><strong>ec2-setup.sh（步骤 8）：</strong>构建 React 前端，安装 systemd 服务，注入 <code>AWS_ENDPOINT_URL_BEDROCK_RUNTIME</code> 连接 Gateway 到 H2 Proxy。</li></ul><h4>CloudFormation 资源</h4><div class="code">VPC + 子网 + Internet Gateway + 路由表\nEC2 实例 (c7g.large Graviton, Ubuntu 24.04)\nECR 仓库 | S3 桶（版本化）\nIAM 角色：EC2 实例角色 + AgentCore 执行角色\nECS 集群 + 任务定义（Always-on 用）\nEFS 文件系统 | CloudWatch 日志组</div><h4>⚠️ 自审：部署陷阱</h4><ul style="font-size:12px;color:var(--text-s);line-height:1.8"><li><strong>新账号首次部署可能失败（ECS 角色）：</strong>新 AWS 账号需约 30 秒角色传播。重跑即可。</li><li><strong>S3 桶名冲突：</strong>同账号多 region 需设 WORKSPACE_BUCKET_NAME。</li><li><strong>seed 脚本需要 import os：</strong>缺失导致 seed 静默失败——表创建但空（无员工、无角色）。</li><li><strong>JWT_SECRET 每次 deploy 重新生成：</strong>重新部署使现有 token 失效。员工需重新登录。</li><li><strong>Docker 镜像必须在 agent-container 代码变更后重建：</strong>EC2 代码变更不影响容器——须用 <code>deploy.sh --skip-seed</code> 重建。</li></ul>'
+    );
+  }
+},
 
-org: { en:{title:'Organization Management',sub:'Departments → Positions → Employees — the foundation of agent governance.'}, zh:{title:'组织架构管理',sub:'部门 → 岗位 → 员工 — Agent 治理的基础。'}, body(){ return intent('The organization module has three layers mirroring your real company. <strong>Departments</strong> = isolation boundaries. <strong>Positions</strong> = Agent DNA (SOUL + skills + tools + permissions). <strong>Employees</strong> = auto-provisioned. Assign position → agent created with everything inherited. You manage <strong>10 positions instead of 500 agents</strong>.','组织模块有三层映射真实公司。<strong>部门</strong> = 隔离边界。<strong>岗位</strong> = Agent DNA（SOUL + 技能 + 工具 + 权限）。<strong>员工</strong> = 自动配置。分配岗位 → Agent 自动创建并继承一切。您管理<strong>10 个岗位而非 500 个 Agent</strong>。') + sectionHead(t('Departments','部门')) + note('info','📍',t('<strong>Organization → Departments.</strong> Hierarchy tree with headcount. Managers only see their department scope.','<strong>Organization → Departments。</strong>层级树含人数。经理只看到自己部门范围。')) + sectionHead(t('Positions — Agent DNA','岗位 — Agent DNA')) + steps(t('Operations:','操作：'),t(['Organization → Positions. Each shows member count + SOUL status.','Click position → SOUL tab → write role behavior.','Skills & Tools tab → assign tool permissions per role.','Positions with "Empty" SOUL need attention.'],['Organization → Positions。每个显示成员数 + SOUL 状态。','点击岗位 → SOUL 标签 → 编写角色行为。','Skills & Tools 标签 → 分配各角色工具权限。','标记"Empty"SOUL 的岗位需要配置。'])) + sectionHead(t('Employees — Auto-Provisioning','员工 — 自动配置')) + steps(t('Operations:','操作：'),t(['Organization → Employees. All with position, channels, agent status.','Add Employee → select position → auto-provisioned (Serverless).','Each gets 1:1 agent binding. Upgrade to Always-on later if needed.','Click employee → edit personal SOUL, view IM channels.'],['Organization → Employees。显示岗位、通道、Agent 状态。','添加员工 → 选择岗位 → 自动配置（Serverless）。','每个获得 1:1 Agent 绑定。需要时可升级为 Always-on。','点击员工 → 编辑个人 SOUL，查看 IM 通道。'])) + note('tip','💡',t('<strong>Value:</strong> 50 new hires → assign to position → 50 agents instantly with correct SOUL, skills, permissions. Zero manual config.','<strong>价值：</strong>50 名新员工 → 分配岗位 → 50 个 Agent 立即拥有正确的 SOUL、技能、权限。零手动配置。')); }},
+login: {
+  en: { title:'Access the Admin Console', sub:'SSM port-forward, browser, sign in.' },
+  zh: { title:'登录管理控制台', sub:'SSM 端口转发 → 浏览器 → 登录。' },
+  body() {
+    return intent(
+      t(
+        '<strong>Why no public URL?</strong> The Admin Console manages your entire AI workforce. Exposing it to the internet is a critical security risk. It runs behind AWS SSM Session Manager — a <strong>zero-trust model</strong> requiring IAM authentication for every connection.',
+        '<strong>为什么没有公网 URL？</strong>管理控制台管理整个 AI 员工队伍。暴露到互联网是关键安全风险。运行在 SSM Session Manager 之后——<strong>零信任模型</strong>，每次连接需要 IAM 认证。'
+      )
+    )
+    + sectionHead(t('Connect','连接'))
+    + `<div class="code">aws ssm start-session --target &lt;INSTANCE_ID&gt; --region &lt;REGION&gt; \\
+  --document-name AWS-StartPortForwardingSession \\
+  --parameters 'portNumber=8099,localPortNumber=8099'</div>`
+    + note('ok','\u2705',t(
+      '<strong>Open http://localhost:8099</strong> — Login: <code>emp-jiade / ADMIN_PASSWORD</code><br>Roles: <strong>Admin</strong> (full), <strong>Manager</strong> (org+agents), <strong>Employee</strong> (portal only)',
+      '<strong>打开 http://localhost:8099</strong> — 登录：<code>emp-jiade / ADMIN_PASSWORD</code><br>角色：<strong>Admin</strong>（完整）、<strong>Manager</strong>（组织+Agent）、<strong>Employee</strong>（仅门户）'
+    ));
+  }
+},
+
 
 
 
