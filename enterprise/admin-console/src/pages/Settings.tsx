@@ -382,6 +382,65 @@ function AdminHistoryTab() {
   );
 }
 
+// ─── Fargate Config Tab ──────────────────────────────────────────────────────
+
+function FargateConfigTab() {
+  const { data: services } = useServiceStatus();
+  const ecs = (services as any)?.ecs || {};
+
+  return (
+    <div className="space-y-6 max-w-2xl">
+      <Card>
+        <h3 className="text-sm font-semibold text-text-primary mb-4 flex items-center gap-2">
+          <Server size={16} className="text-primary" /> ECS Fargate Configuration
+        </h3>
+        <p className="text-xs text-text-muted mb-4">
+          Always-On agents run as ECS Fargate tasks. These settings are managed via CloudFormation and deploy.sh.
+        </p>
+        <div className="space-y-3">
+          {[
+            { label: 'ECS Cluster', value: ecs.cluster || 'Not configured' },
+            { label: 'Running Tasks', value: `${ecs.runningTasks || 0}` },
+            { label: 'Task Definition', value: ecs.taskDefinition || '—' },
+            { label: 'Subnets', value: ecs.subnets || '—' },
+            { label: 'Security Group', value: ecs.securityGroup || '—' },
+            { label: 'EFS File System', value: ecs.efsId || '—' },
+          ].map(f => (
+            <div key={f.label} className="flex items-center justify-between rounded-xl bg-surface-dim px-4 py-3">
+              <span className="text-xs text-text-muted">{f.label}</span>
+              <span className="text-sm text-text-primary font-mono">{f.value}</span>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      <Card>
+        <h3 className="text-sm font-semibold text-text-primary mb-4">Tier Defaults</h3>
+        <p className="text-xs text-text-muted mb-4">
+          Tier configurations are defined in Security Center runtime templates. Each tier maps to a runtime with specific model, IAM role, and guardrail settings.
+        </p>
+        <div className="grid grid-cols-2 gap-3">
+          {['standard', 'restricted', 'engineering', 'executive'].map(tier => (
+            <div key={tier} className="rounded-xl bg-dark-bg border border-dark-border/40 px-4 py-3">
+              <p className="text-sm font-medium text-text-primary capitalize">{tier}</p>
+              <p className="text-xs text-text-muted mt-1">
+                {tier === 'standard' ? 'HTTPS outbound, basic model' :
+                 tier === 'restricted' ? 'AWS services only, no internet' :
+                 tier === 'engineering' ? 'Full outbound, advanced model' :
+                 'Full outbound, premium model'}
+              </p>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      <div className="rounded-xl bg-info/5 border border-info/20 px-4 py-3 text-xs text-info">
+        To modify Fargate configuration, update the CloudFormation template parameters or run <code className="bg-info/10 px-1.5 py-0.5 rounded">deploy.sh</code> with updated environment variables.
+      </div>
+    </div>
+  );
+}
+
 // ─── System Tab ───────────────────────────────────────────────────────────────
 
 function SystemTab() {
@@ -490,6 +549,7 @@ export default function Settings() {
           { id: 'platform-logs', label: 'Platform Logs' },
           { id: 'assistant', label: 'Admin Assistant' },
           { id: 'admin-history', label: 'Admin History' },
+          { id: 'fargate', label: 'Fargate' },
           { id: 'interface', label: 'Interface' },
           { id: 'system', label: 'System' },
         ]}
@@ -503,6 +563,7 @@ export default function Settings() {
         {tab === 'platform-logs' && <PlatformLogsTab />}
         {tab === 'assistant' && <AdminAssistantTab />}
         {tab === 'admin-history' && <AdminHistoryTab />}
+        {tab === 'fargate' && <FargateConfigTab />}
         {tab === 'interface' && (
           <div className="space-y-6 max-w-lg">
             <Card>

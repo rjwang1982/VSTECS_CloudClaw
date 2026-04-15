@@ -7,7 +7,7 @@ import { Card, Badge, Button, PageHeader, StatusDot, Modal, Tabs } from '../../c
 import { useAgent, useAgents, usePositions, useEmployees, useBindings, useSessions, useAgentDailyUsage, useAlwaysOnStatus, useAlwaysOnChannels, useEnableAlwaysOn, useDisconnectChannel, useSecurityRuntimes, usePositionRuntimeMap, useModelConfig, useAuditEntries, useSetIMPlatforms } from '../../hooks/useApi';
 import { api } from '../../api/client';
 import { CHANNEL_LABELS } from '../../types';
-import type { ChannelType } from '../../types';
+import type { ChannelType, AlwaysOnStatus, AlwaysOnChannel, RuntimeConfig } from '../../types';
 
 const activityOpts: ApexOptions = {
   chart: { type: 'bar', toolbar: { show: false }, background: 'transparent' },
@@ -48,26 +48,27 @@ export default function AgentDetail() {
   const { data: auditData = [] } = useAuditEntries({ limit: 20 });
   const setIMPlatforms = useSetIMPlatforms();
   const [confirmDisconnect, setConfirmDisconnect] = useState<string | null>(null);
+  const [disconnectReason, setDisconnectReason] = useState('');
   const empId = agent?.employeeId || '';
-  const { data: aoStatus } = useAlwaysOnStatus(empId) as { data: any };
-  const { data: aoChannels } = useAlwaysOnChannels(empId) as { data: any };
+  const { data: aoStatus } = useAlwaysOnStatus(empId) as { data: AlwaysOnStatus | undefined };
+  const { data: aoChannels } = useAlwaysOnChannels(empId) as { data: { channels: AlwaysOnChannel[] } | undefined };
   const enableAO = useEnableAlwaysOn();
   const disconnectCh = useDisconnectChannel();
-  const { data: runtimesData } = useSecurityRuntimes() as { data: any };
-  const { data: posRuntimeMap } = usePositionRuntimeMap() as { data: any };
-  const { data: mc } = useModelConfig() as { data: any };
+  const { data: runtimesData } = useSecurityRuntimes() as { data: { runtimes: RuntimeConfig[] } | undefined };
+  const { data: posRuntimeMap } = usePositionRuntimeMap() as { data: { map: Record<string, string> } | undefined };
+  const { data: mc } = useModelConfig() as { data: { availableModels: Array<{ modelId: string; modelName: string; enabled: boolean; inputRate: string; outputRate: string }> } | undefined };
   const { data: employees = [] } = useEmployees();
-  const runtimes = (runtimesData as any)?.runtimes || [];
+  const runtimes = runtimesData?.runtimes || [];
   const models = mc?.availableModels || [];
   // Lookup tier runtime config
-  const tierRuntime = runtimes.find((rt: any) => {
+  const tierRuntime = runtimes.find((rt) => {
     const posId = agent?.positionId || '';
-    const mapped = posId ? (posRuntimeMap as any)?.map?.[posId] : undefined;
-    return mapped === rt.id || rt.name?.toLowerCase().includes(aoStatus?.tier?.toLowerCase());
+    const mapped = posId ? posRuntimeMap?.map?.[posId] : undefined;
+    return mapped === rt.id || (aoStatus?.tier && rt.name?.toLowerCase().includes(aoStatus.tier.toLowerCase()));
   });
-  const tierModel = tierRuntime ? (models.find((m: any) => m.modelId === tierRuntime.model)?.modelName || tierRuntime.model?.split('/').pop()?.split(':')[0] || '—') : '—';
+  const tierModel = tierRuntime ? (models.find((m) => m.modelId === tierRuntime.model)?.modelName || tierRuntime.model?.split('/').pop()?.split(':')[0] || '—') : '—';
   // Position change detection
-  const currentEmployee = employees.find((e: any) => e.id === empId);
+  const currentEmployee = employees.find(e => e.id === empId);
   const positionMismatch = agent && currentEmployee && agent.positionId !== currentEmployee.positionId;
 
   if (isLoading) {
@@ -147,7 +148,7 @@ export default function AgentDetail() {
             ...(aoStatus?.enabled ? [{ id: 'always-on', label: '⚡ Always-On Agent' }] : []),
           ]}
           activeTab={agentTab}
-          onChange={t => setAgentTab(t as any)}
+          onChange={t => setAgentTab(t as 'serverless' | 'always-on')}
         />
 
         <div className="mt-4">
@@ -233,7 +234,7 @@ export default function AgentDetail() {
                   <p className="text-[10px] text-text-muted mb-1.5">Allowed Platforms (from position: {agent.positionName})</p>
                   <div className="flex flex-wrap gap-1.5">
                     {['feishu', 'telegram', 'slack', 'discord', 'dingtalk', 'whatsapp'].map(p => {
-                      const allowed = (position as any)?.allowedIMPlatforms;
+                      const allowed = position?.allowedIMPlatforms;
                       const isAllowed = !allowed || allowed.length === 0 || allowed.includes(p);
                       return (
                         <span key={p} className={`text-[10px] px-2 py-0.5 rounded-full ${isAllowed ? 'bg-success/10 text-success' : 'bg-dark-bg text-text-muted line-through'}`}>
@@ -249,7 +250,7 @@ export default function AgentDetail() {
                   <p className="text-xs text-text-muted py-2">No IM channels connected. Employee can connect via Portal → Connect IM.</p>
                 ) : (
                   <div className="space-y-1.5">
-                    {(aoChannels?.channels || []).map((ch: any) => (
+                    {(aoChannels?.channels || []).map((ch: AlwaysOnChannel) => (
                       <div key={ch.channel} className="flex items-center justify-between rounded-lg bg-dark-bg px-3 py-2">
                         <div className="flex items-center gap-2">
                           <Badge color="success">{ch.channel}</Badge>
@@ -257,9 +258,14 @@ export default function AgentDetail() {
                         </div>
                         {confirmDisconnect === ch.channel ? (
                           <div className="flex items-center gap-1.5">
-                            <span className="text-[10px] text-danger">Confirm?</span>
-                            <Button variant="danger" size="sm" onClick={() => { disconnectCh.mutate({ empId, channel: ch.channel }); setConfirmDisconnect(null); }}>Yes</Button>
-                            <Button variant="ghost" size="sm" onClick={() => setConfirmDisconnect(null)}>No</Button>
+                            <input
+                              value={disconnectReason}
+                              onChange={e => setDisconnectReason(e.target.value)}
+                              placeholder="Reason (optional)"
+                              className="rounded-lg border border-dark-border/60 bg-surface-dim px-2 py-1 text-xs text-text-primary w-40 focus:border-primary/60 focus:outline-none"
+                            />
+                            <Button variant="danger" size="sm" onClick={() => { disconnectCh.mutate({ empId, channel: ch.channel, reason: disconnectReason || undefined }); setConfirmDisconnect(null); setDisconnectReason(''); }}>Yes</Button>
+                            <Button variant="ghost" size="sm" onClick={() => { setConfirmDisconnect(null); setDisconnectReason(''); }}>No</Button>
                           </div>
                         ) : (
                           <Button variant="ghost" size="sm" className="text-danger" onClick={() => setConfirmDisconnect(ch.channel)}>

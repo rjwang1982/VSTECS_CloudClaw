@@ -1238,8 +1238,8 @@ export function useEnableAlwaysOn() {
 export function useDisconnectChannel() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ empId, channel }: { empId: string; channel: string }) =>
-      api.del(`/agents/${empId}/always-on/channels/${channel}`),
+    mutationFn: ({ empId, channel, reason }: { empId: string; channel: string; reason?: string }) =>
+      api.del(`/agents/${empId}/always-on/channels/${channel}${reason ? `?reason=${encodeURIComponent(reason)}` : ''}`),
     onSuccess: (_, { empId }) => {
       qc.invalidateQueries({ queryKey: ['always-on-channels', empId] });
     },

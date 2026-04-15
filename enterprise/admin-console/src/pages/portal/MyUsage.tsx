@@ -4,6 +4,7 @@ import type { ApexOptions } from 'apexcharts';
 import { BarChart3, Zap, DollarSign, Clock } from 'lucide-react';
 import { api } from '../../api/client';
 import { Card, StatCard } from '../../components/ui';
+import { usePortalAgent } from '../../contexts/PortalAgentContext';
 
 const chartOpts: ApexOptions = {
   chart: { type: 'bar', toolbar: { show: false }, background: 'transparent' },
@@ -17,11 +18,12 @@ const chartOpts: ApexOptions = {
 };
 
 export default function MyUsage() {
+  const { agentType } = usePortalAgent();
   const [data, setData] = useState<any>(null);
 
   useEffect(() => {
-    api.get<any>('/portal/usage').then(setData).catch(() => {});
-  }, []);
+    api.get<any>(`/portal/usage?agent_type=${agentType}`).then(setData).catch(() => {});
+  }, [agentType]);
 
   if (!data) return <div className="p-6 text-text-muted">Loading...</div>;
 

@@ -5,6 +5,7 @@ import ReactMarkdown from 'react-markdown';
 import { Card, Badge, Button, PageHeader } from '../../components/ui';
 import { useAgents, usePositions, useWorkspaceTree } from '../../hooks/useApi';
 import { api } from '../../api/client';
+import { isAlwaysOn } from '../../types';
 import clsx from 'clsx';
 
 interface WsFile {
@@ -127,7 +128,7 @@ export default function Workspace() {
   }, [agents, selectedAgent, searchParams]);
 
   const agent = agents.find(a => a.id === selectedAgent);
-  const wsAgentType = agent?.deployMode === 'always-on-ecs' ? 'always-on' as const : 'serverless' as const;
+  const wsAgentType = isAlwaysOn(agent?.deployMode) ? 'always-on' : 'serverless';
   const { data: wsTree, isLoading: treeLoading } = useWorkspaceTree(selectedAgent, wsAgentType);
 
   const position = positions.find(p => p.id === agent?.positionId);
@@ -173,7 +174,7 @@ export default function Workspace() {
     setIsEditing(false);
     setLoading(true);
     try {
-      const resp = await api.get<{ key: string; content: string; size: number }>(`/workspace/file?key=${encodeURIComponent(file.key)}`);
+      const resp = await api.get<{ key: string; content: string; size: number }>(`/workspace/file?key=${encodeURIComponent(file.key)}&agent_type=${wsAgentType}`);
       setFileContent(resp.content);
       setEditContent(resp.content);
     } catch {
@@ -201,7 +202,7 @@ export default function Workspace() {
     setConfirmSoul(false);
     setSaving(true);
     try {
-      await api.put('/workspace/file', { key: selectedFileKey, content: editContent });
+      await api.put('/workspace/file', { key: selectedFileKey, content: editContent, agent_type: wsAgentType });
       setFileContent(editContent);
       setIsEditing(false);
       setTimeout(() => setSaving(false), 800);
@@ -265,13 +266,13 @@ export default function Workspace() {
                   {agents.filter(a => a.deployMode !== 'always-on-ecs').map(a => <option key={a.id} value={a.id}>{a.name} ({a.positionName})</option>)}
                 </optgroup>
                 <optgroup label="Always-on Agents">
-                  {agents.filter(a => a.deployMode === 'always-on-ecs').map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                  {agents.filter(a => isAlwaysOn(a.deployMode)).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
                 </optgroup>
               </select>
             )}
           </div>
           <div className="flex items-center gap-2 text-sm">
-            {agent?.deployMode === 'always-on-ecs' ? (
+            {isAlwaysOn(agent?.deployMode) ? (
               <Badge color="success">EFS · Persistent</Badge>
             ) : (
               <Badge color="info">S3 · Sync on session end</Badge>
@@ -358,12 +359,12 @@ export default function Workspace() {
           <div className="lg:col-span-3 mb-2">
             <div className="flex items-center gap-3 rounded-xl bg-danger/10 border border-danger/30 px-4 py-3 text-sm">
               <AlertTriangle size={16} className="text-danger shrink-0" />
-              <span className="text-text-primary flex-1"><strong>Warning:</strong> Saving SOUL.md changes affects live agent behavior immediately. {agent?.deployMode === 'always-on-ecs' ? 'The always-on Fargate container will apply changes within seconds via /admin/refresh.' : 'All new sessions will use the updated SOUL.'}</span>
+              <span className="text-text-primary flex-1"><strong>Warning:</strong> Saving SOUL.md changes affects live agent behavior immediately. {isAlwaysOn(agent?.deployMode) ? 'The always-on Fargate container will apply changes within seconds via /admin/refresh.' : 'All new sessions will use the updated SOUL.'}</span>
               <Button size="sm" variant="danger" onClick={async () => {
                 setConfirmSoul(false);
                 setSaving(true);
                 try {
-                  await api.put('/workspace/file', { key: selectedFileKey, content: editContent });
+                  await api.put('/workspace/file', { key: selectedFileKey, content: editContent, agent_type: wsAgentType });
                   setFileContent(editContent);
                   setIsEditing(false);
                   setTimeout(() => setSaving(false), 800);
