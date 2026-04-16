@@ -327,11 +327,14 @@ def playground_send(body: PlaygroundMessage, authorization: str = Header(default
                     "plan_e": f"ERROR — Status {r.status_code}", "source": "error",
                 }
         except Exception as e:
+            # Fallback to Bedrock simulate when AgentCore is unavailable
+            result = _simulate_agent(emp_id, body.message, profile)
             return {
-                "response": f"AgentCore call failed: {e}\n\nFalling back to simulation.",
+                "response": result["response"],
                 "tenant_id": body.tenant_id, "profile": profile,
                 "plan_a": profile.get("planA", ""),
-                "plan_e": "ERROR — AgentCore unreachable.", "source": "error",
+                "plan_e": result.get("plan_e", "⚠️ AgentCore unavailable, used Bedrock Simulate fallback"),
+                "source": result.get("source", "simulate-fallback"),
             }
 
     # Simulate mode: Bedrock Converse with real SOUL
