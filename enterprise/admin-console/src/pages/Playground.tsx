@@ -136,7 +136,7 @@ export default function Playground() {
   const [inputValue, setInputValue] = useState('');
   const [lastPlanE, setLastPlanE] = useState('No messages yet');
   const [sending, setSending] = useState(false);
-  const mode = 'live' as const;  // Only Live mode — Admin tests real AgentCore behavior
+  const [mode, setMode] = useState<'live' | 'simulate'>('simulate');  // Default simulate for demo
   const [activeTab, setActiveTab] = useState('pipeline');
   const [tenantReady, setTenantReady] = useState(false);
 
@@ -242,7 +242,14 @@ export default function Playground() {
     }
   };
 
-  // Mode removed — always Live for real AgentCore testing
+  // Mode toggle
+  const modeToggle = (
+    <div className="flex items-center gap-2 text-sm">
+      <span className="text-text-muted">Mode:</span>
+      <button onClick={() => setMode('simulate')} className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${mode === 'simulate' ? 'bg-primary text-white' : 'bg-dark-hover text-text-muted'}`}>Simulate</button>
+      <button onClick={() => setMode('live')} className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${mode === 'live' ? 'bg-red-500 text-white' : 'bg-dark-hover text-text-muted'}`}>🔴 Live (AgentCore)</button>
+    </div>
+  );
 
   return (
     <div>
@@ -264,9 +271,7 @@ export default function Playground() {
             <Select label="Tenant Context" value={tenantId} onChange={v => setTenantId(v)} options={tenantOptions} />
 
             <div className="mt-2 flex items-center gap-2">
-              <span className="h-2 w-2 rounded-full animate-pulse bg-success" />
-              <Badge color="success">Live</Badge>
-              <span className="text-xs text-text-muted">Real AgentCore — tests actual tool permissions and security rules</span>
+              {modeToggle}
             </div>
           </div>
 
