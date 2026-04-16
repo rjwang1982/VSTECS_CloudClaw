@@ -40,7 +40,7 @@ Deploy in 8 minutes. Access from your phone.
 | **EU (Ireland)** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=eu-west-1#/stacks/create/review?stackName=openclaw-bedrock&templateURL=https://sharefile-jiade.s3.cn-northwest-1.amazonaws.com.cn/clawdbot-bedrock.yaml) |
 | **Asia Pacific (Tokyo)** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=ap-northeast-1#/stacks/create/review?stackName=openclaw-bedrock&templateURL=https://sharefile-jiade.s3.cn-northwest-1.amazonaws.com.cn/clawdbot-bedrock.yaml) |
 
-> **Prerequisites**: Enable Bedrock models in the [Bedrock Console](https://console.aws.amazon.com/bedrock/) and create an EC2 key pair in your target region.
+> **Prerequisites**: Create an EC2 key pair in your target region. Bedrock model access is automatic — no manual enablement required.
 
 ### After Deployment
 
@@ -171,7 +171,10 @@ Switch models with one CloudFormation parameter — no code changes:
 |-------|---------------------------|----------|
 | **Nova 2 Lite** (default) | $0.30 / $2.50 | Everyday tasks, 90% cheaper than Claude |
 | Nova Pro | $0.80 / $3.20 | Balanced performance, multimodal |
+| Claude Opus 4.6 | $15.00 / $75.00 | Most capable, complex agentic tasks |
+| Claude Opus 4.5 | $15.00 / $75.00 | Deep analysis, extended thinking |
 | Claude Sonnet 4.5 | $3.00 / $15.00 | Complex reasoning, coding |
+| Claude Sonnet 4 | $3.00 / $15.00 | Reliable coding and analysis |
 | Claude Haiku 4.5 | $1.00 / $5.00 | Fast and efficient |
 | DeepSeek R1 | $0.55 / $2.19 | Open-source reasoning |
 | Llama 3.3 70B | — | Open-source alternative |
@@ -322,6 +325,12 @@ Built on top of the Multi-Tenant AgentCore Runtime, the Enterprise platform adds
 | Sample org | 20 employees, 20 agents, 13 departments — seed scripts included |
 
 **[→ Enterprise Platform Guide](README_ENTERPRISE.md)** · **[→ Enterprise Roadmap](enterprise/ROADMAP.md)**
+
+### EKS (Kubernetes) — For Container-Native Deployments
+
+Run OpenClaw agents on Amazon EKS with Terraform. Supports AWS Global and China regions.
+
+**[→ EKS Deployment Guide (EN)](docs/DEPLOYMENT_EKS.md)** · **[→ EKS 部署指南 (中文)](docs/DEPLOYMENT_EKS_CN.md)**
 
 ### macOS (Apple Silicon) — For iOS/macOS Development
 

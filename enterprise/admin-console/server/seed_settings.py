@@ -1,5 +1,6 @@
 """Seed DynamoDB with settings (model config, security policy)."""
 import argparse
+import os
 import json
 import boto3
 
@@ -33,7 +34,7 @@ def seed(table_name: str, region: str):
     items.append({"PK": ORG, "SK": "CONFIG#security", "GSI1PK": "TYPE#config", "GSI1SK": "CONFIG#security",
         "alwaysBlocked": ["install_skill", "load_extension", "eval", "rm -rf /", "chmod 777"],
         "piiDetection": {"enabled": True, "mode": "redact"},
-        "dataSovereignty": {"enabled": True, "region": "us-east-2"},
+        "dataSovereignty": {"enabled": True, "region": "us-east-1"},
         "conversationRetention": {"days": 180},
         "dockerSandbox": True,
         "fastPathRouting": True,
@@ -61,6 +62,38 @@ def seed(table_name: str, region: str):
         "employeeKBs": {},
     })
 
+    # IM bot info — admin configures actual values via Admin Console after
+    # setting up bots in the Gateway UI.  Deep link templates are fixed per
+    # platform; only the bot-specific fields (appId, username) need filling in.
+    items.append({"PK": ORG, "SK": "CONFIG#im-bot-info", "GSI1PK": "TYPE#config", "GSI1SK": "CONFIG#im-bot-info",
+        "channels": {
+            "telegram": {
+                "label": "Telegram",
+                "botUsername": "",
+                "deepLinkTemplate": "https://t.me/{bot}?start={token}",
+            },
+            "discord": {
+                "label": "Discord",
+                "botUsername": "",
+                "instructions": "Open Discord → company server → DM the bot → send the command",
+            },
+            "feishu": {
+                "label": "Feishu / Lark",
+                "botUsername": "",
+                "feishuAppId": "",
+                "deepLinkTemplate": "https://applink.feishu.cn/client/bot/open?appId={appId}",
+            },
+            "slack": {
+                "label": "Slack",
+                "botUsername": "",
+            },
+            "whatsapp": {
+                "label": "WhatsApp",
+                "botUsername": "",
+            },
+        },
+    })
+
     print(f"Writing {len(items)} config items...")
     with table.batch_writer() as batch:
         for item in items:
@@ -69,7 +102,7 @@ def seed(table_name: str, region: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--table", default="openclaw-enterprise")
-    parser.add_argument("--region", default="us-east-2")
+    parser.add_argument("--table", default=os.environ.get("DYNAMODB_TABLE", "openclaw"))
+    parser.add_argument("--region", default=os.environ.get("AWS_REGION", "us-east-1"))
     args = parser.parse_args()
     seed(args.table, args.region)

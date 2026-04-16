@@ -1,5 +1,6 @@
 """Seed DynamoDB with audit entries and approvals."""
 import argparse
+import os
 import boto3
 
 ORG = "ORG#acme"
@@ -55,7 +56,7 @@ def seed(table_name: str, region: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--table", default="openclaw-enterprise")
-    parser.add_argument("--region", default="us-east-2")
+    parser.add_argument("--table", default=os.environ.get("DYNAMODB_TABLE", "openclaw"))
+    parser.add_argument("--region", default=os.environ.get("AWS_REGION", "us-east-1"))
     args = parser.parse_args()
     seed(args.table, args.region)

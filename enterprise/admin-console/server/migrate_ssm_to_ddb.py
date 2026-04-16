@@ -103,7 +103,7 @@ def migrate_routing_config(ssm, stack: str) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description="Migrate SSM user-mapping and routing config to DynamoDB")
-    parser.add_argument("--stack", default="openclaw-multitenancy")
+    parser.add_argument("--stack", default="openclaw")
     parser.add_argument("--region", default="us-east-1")
     parser.add_argument("--dry-run", action="store_true", help="Print what would be migrated, don't write")
     args = parser.parse_args()

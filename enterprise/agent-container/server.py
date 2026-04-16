@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from permissions import read_permission_profile
@@ -25,9 +26,8 @@ from safety import validate_message
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-# Path to openclaw binary (nvm install on EC2, system install in container)
+# Path to openclaw binary (system install in container, nvm on EC2)
 _OPENCLAW_CANDIDATES = [
-    "/home/ubuntu/.nvm/versions/node/v22.22.1/bin/openclaw",
     "/usr/local/bin/openclaw",
     "/usr/bin/openclaw",
 ]
@@ -94,8 +94,8 @@ WORKSPACE = os.environ.get("OPENCLAW_WORKSPACE", "/root/.openclaw/workspace")
 S3_BUCKET = os.environ.get("S3_BUCKET", "openclaw-tenants-000000000000")
 STACK_NAME = os.environ.get("STACK_NAME", "dev")
 AWS_REGION_RUNTIME = os.environ.get("AWS_REGION", "us-east-1")
-DYNAMODB_TABLE = os.environ.get("DYNAMODB_TABLE", "openclaw-enterprise")
-DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", "us-east-2")
+DYNAMODB_TABLE = os.environ.get("DYNAMODB_TABLE", os.environ.get("STACK_NAME", "openclaw"))
+DYNAMODB_REGION = os.environ.get("DYNAMODB_REGION", os.environ.get("AWS_REGION", "us-east-1"))
 
 
 def _append_conversation_turn(tenant_id: str, user_message: str, assistant_reply: str, model: str, duration_ms: int):
@@ -181,24 +181,41 @@ def _write_usage_to_dynamodb(tenant_id: str, base_id: str, usage: dict, model: s
         output_tokens = int(usage.get("output", 0))
         total_tokens = int(usage.get("total", input_tokens + output_tokens))
 
-        # Estimate cost based on model (Nova 2 Lite: $0.30/$2.50 per 1M tokens)
-        cost = Decimal(str(round(input_tokens * 0.30 / 1_000_000 + output_tokens * 2.50 / 1_000_000, 6)))
+        # Model-aware pricing — cost based on actual model used
+        MODEL_PRICING = {
+            "global.amazon.nova-2-lite-v1:0":           {"input": 0.30, "output": 2.50},
+            "us.amazon.nova-pro-v1:0":                  {"input": 0.80, "output": 3.20},
+            "global.anthropic.claude-sonnet-4-5-20250929-v1:0": {"input": 3.00, "output": 15.00},
+            "global.anthropic.claude-sonnet-4-6":        {"input": 3.00, "output": 15.00},
+            "global.anthropic.claude-opus-4-6-v1":       {"input": 15.00, "output": 75.00},
+            "global.anthropic.claude-opus-4-5-20251101-v1:0": {"input": 15.00, "output": 75.00},
+            "global.anthropic.claude-haiku-4-5-20251001-v1:0": {"input": 0.80, "output": 4.00},
+            "us.deepseek.r1-v1:0":                      {"input": 1.35, "output": 5.40},
+            "us.meta.llama3-3-70b-instruct-v1:0":       {"input": 0.72, "output": 0.72},
+            "moonshotai.kimi-k2.5":                      {"input": 0.60, "output": 3.00},
+        }
+        pricing = MODEL_PRICING.get(model, {"input": 0.30, "output": 2.50})
+        cost = Decimal(str(round((input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000, 6)))
 
-        # 1. Atomic increment USAGE#{base_id}#{date}
+        # 1. Atomic increment USAGE#{base_id}/{agent_type}#{date}
+        # Detect agent type: EFS_ENABLED=true means Fargate always-on
+        agent_type = "always-on" if os.environ.get("EFS_ENABLED") == "true" else "serverless"
+        usage_key = f"USAGE#{base_id}/{agent_type}#{today}"
         table.update_item(
-            Key={"PK": org_pk, "SK": f"USAGE#{base_id}#{today}"},
-            UpdateExpression="SET #d = :date, agentId = :aid, model = :model, GSI1PK = :gsi1pk, GSI1SK = :gsi1sk ADD inputTokens :inp, outputTokens :out, requests :one, cost :cost",
+            Key={"PK": org_pk, "SK": usage_key},
+            UpdateExpression="SET #d = :date, agentId = :aid, model = :model, agentType = :at, GSI1PK = :gsi1pk, GSI1SK = :gsi1sk ADD inputTokens :inp, outputTokens :out, requests :one, cost :cost",
             ExpressionAttributeNames={"#d": "date"},
             ExpressionAttributeValues={
                 ":date": today,
                 ":aid": base_id,
                 ":model": model,
+                ":at": agent_type,
                 ":inp": input_tokens,
                 ":out": output_tokens,
                 ":one": 1,
                 ":cost": cost,
                 ":gsi1pk": "TYPE#usage",
-                ":gsi1sk": f"USAGE#{today}#{base_id}",
+                ":gsi1sk": f"USAGE#{today}#{base_id}/{agent_type}",
             },
         )
 
@@ -271,21 +288,14 @@ def _write_usage_to_dynamodb(tenant_id: str, base_id: str, usage: dict, model: s
         logger.warning("DynamoDB usage write failed (non-fatal): %s", e)
 
 
-def _session_storage_has_workspace() -> bool:
-    """Check if Session Storage restored a previous workspace.
-    Session Storage mounts at WORKSPACE path and restores files from the previous session.
-    If SOUL.md exists, the workspace was previously assembled and persisted."""
-    soul_path = os.path.join(WORKSPACE, "SOUL.md")
-    return os.path.isfile(soul_path) and os.path.getsize(soul_path) > 50
-
-
 def _ensure_workspace_assembled(tenant_id: str) -> None:
     """Assemble workspace on first invocation for a tenant.
     Runs workspace_assembler.py to merge Global + Position + Personal SOUL.
     Thread-safe: only runs once per tenant per microVM lifecycle.
 
-    Session Storage optimization: if the workspace was restored from a previous
-    session and config_version hasn't changed, skip S3 download and assembly."""
+    Every new tenant_id triggers a full S3 download + assembly (~6s).
+    The _assembled_tenants set prevents re-assembly for the same tenant
+    within the same microVM/container lifecycle."""
     if tenant_id in _assembled_tenants or tenant_id == "unknown":
         return
 
@@ -293,15 +303,13 @@ def _ensure_workspace_assembled(tenant_id: str) -> None:
         if tenant_id in _assembled_tenants:
             return  # double-check after acquiring lock
 
-        # Session Storage optimization: if workspace already has assembled files
-        # AND global config hasn't changed, skip the full S3 download + assembly.
-        # This reduces session resume from ~6s to ~0.5s.
-        if _session_storage_has_workspace() and _config_version:
-            # Config version is already loaded and hasn't changed since last check
-            logger.info("Session Storage resume for tenant %s — workspace intact, config_version=%s",
-                        tenant_id, _config_version)
-            _assembled_tenants.add(tenant_id)
-            return
+        # No Session Storage optimization — always assemble from S3.
+        # Session Storage was removed from the architecture (2026-04-14):
+        # - Caused identity loss (cached generic SOUL from tenant=unknown boot)
+        # - Caused stale KB files (cached old versions, skipped re-download)
+        # - 1GB space limit risk (output files + skills accumulated)
+        # - 3-way state complexity (local + Session Storage + S3 divergence)
+        # Trade-off: ~6s per new tenant on cold start. Acceptable — Fargate has 0s.
 
         logger.info("First invocation for tenant %s — assembling workspace", tenant_id)
 
@@ -326,8 +334,8 @@ def _ensure_workspace_assembled(tenant_id: str) -> None:
         if not base_id.startswith("emp-"):
             try:
                 import boto3 as _b3_mapping
-                ddb = _b3_mapping.resource("dynamodb", region_name=os.environ.get("DYNAMODB_REGION", "us-east-2"))
-                table = ddb.Table(os.environ.get("DYNAMODB_TABLE", "openclaw-enterprise"))
+                ddb = _b3_mapping.resource("dynamodb", region_name=os.environ.get("DYNAMODB_REGION", os.environ.get("AWS_REGION", "us-east-1")))
+                table = ddb.Table(os.environ.get("DYNAMODB_TABLE", os.environ.get("STACK_NAME", "openclaw")))
                 channel_prefix = parts[0] if len(parts) >= 2 else ""
                 # Try exact channel+userId key first
                 resp_ddb = table.get_item(Key={"PK": "ORG#acme", "SK": f"MAPPING#{channel_prefix}__{base_id}"})
@@ -418,53 +426,10 @@ def _ensure_workspace_assembled(tenant_id: str) -> None:
         else:
             logger.warning("workspace_assembler.py not found at %s", assembler)
 
-        # 3. Plan A: Prepend permission constraints to merged SOUL.md
-        # Skip for exec profile — SOUL.md already declares full tool access,
-        # and injecting restrictions would conflict with the executive tier design.
-        soul_path = os.path.join(WORKSPACE, "SOUL.md")
-        if os.path.isfile(soul_path):
-            try:
-                profile = read_permission_profile(tenant_id)
-                is_exec = profile.get("role") == "exec" or profile.get("profile") == "exec"
-                # Detect digital twin channel (twin__emp_id__...)
-                is_twin = tenant_id.startswith("twin__")
-                if not is_exec and not is_twin:
-                    constraint = _build_system_prompt(tenant_id)
-                    if constraint:
-                        with open(soul_path, "r") as f:
-                            existing = f.read()
-                        if "Allowed tools for this session" not in existing:
-                            with open(soul_path, "w") as f:
-                                f.write(f"<!-- PLAN A: PERMISSION ENFORCEMENT -->\n{constraint}\n\n---\n\n{existing}")
-                            logger.info("Plan A constraints injected into SOUL.md for %s", tenant_id)
-                elif is_twin:
-                    # Digital twin mode: inject representative persona context
-                    with open(soul_path, "r") as f:
-                        existing = f.read()
-                    if "DIGITAL TWIN MODE" not in existing:
-                        # Extract employee name from workspace files
-                        user_md_path = os.path.join(WORKSPACE, "USER.md")
-                        user_md = ""
-                        if os.path.isfile(user_md_path):
-                            with open(user_md_path) as f:
-                                user_md = f.read()[:500]
-                        twin_ctx = (
-                            "\n\n<!-- DIGITAL TWIN MODE -->\n"
-                            "You are this employee's AI digital representative. Someone is accessing your owner's digital twin link.\n"
-                            "- Introduce yourself as their AI assistant standing in for them\n"
-                            "- Answer based on their expertise, SOUL profile, and memory\n"
-                            "- If asked where they are: explain they are unavailable but you can help\n"
-                            "- Be warm, professional, and helpful — represent them well\n"
-                            "- Use `web_search` to look up current information when needed\n"
-                            "- Do NOT reveal private/sensitive internal data\n"
-                        )
-                        with open(soul_path, "a") as f:
-                            f.write(twin_ctx)
-                        logger.info("Digital twin context injected for %s", tenant_id)
-                else:
-                    logger.info("Plan A skipped for exec profile tenant %s", tenant_id)
-            except Exception as e:
-                logger.warning("Plan A injection failed for %s: %s", tenant_id, e)
+        # 3. Plan A + Twin + KB + Language context:
+        # ALL moved to workspace_assembler.py _build_context_block().
+        # server.py no longer modifies SOUL.md. The assembler writes a complete
+        # SOUL.md in a single pass (3-layer merge + context block).
 
         # 4. Re-source skill env vars (in case skills were loaded)
         skill_env = "/tmp/skill_env.sh"
@@ -536,13 +501,11 @@ def _ensure_workspace_assembled(tenant_id: str) -> None:
             ddb = _b3_model.resource("dynamodb", region_name=DYNAMODB_REGION)
             table = ddb.Table(DYNAMODB_TABLE)
 
-            # Read position for this employee
+            # Read position for this employee from DynamoDB
             pos_id = ""
             try:
-                ssm_client = _b3_model.client("ssm", region_name=AWS_REGION_RUNTIME)
-                pos_resp = ssm_client.get_parameter(
-                    Name=f"/openclaw/{STACK_NAME}/tenants/{base_id}/position")
-                pos_id = pos_resp["Parameter"]["Value"]
+                emp_resp = table.get_item(Key={"PK": "ORG#acme", "SK": f"EMP#{base_id}"})
+                pos_id = emp_resp.get("Item", {}).get("positionId", "")
             except Exception:
                 pass
 
@@ -609,106 +572,8 @@ def _ensure_workspace_assembled(tenant_id: str) -> None:
                             json.dump(oc, f, indent=2)
                         logger.info("Agent config applied for %s: %s", base_id, list(eff_cfg.keys()))
 
-                    # Language preference: inject at end of SOUL.md
-                    lang = eff_cfg.get("language", "")
-                    if lang:
-                        soul_path = os.path.join(WORKSPACE, "SOUL.md")
-                        if os.path.isfile(soul_path):
-                            lang_note = f"\n\n<!-- LANGUAGE PREFERENCE -->\nAlways respond in **{lang}** unless the user explicitly writes in a different language."
-                            with open(soul_path, "a") as f:
-                                f.write(lang_note)
-                            logger.info("Language preference injected: %s", lang)
-
-            # --- Knowledge Base injection ---
-            # Inject position/employee KB documents into workspace/knowledge/
-            kb_cfg_resp = table.get_item(Key={"PK": "ORG#acme", "SK": "CONFIG#kb-assignments"})
-            if "Item" in kb_cfg_resp:
-                kb_cfg = kb_cfg_resp["Item"]
-                kb_ids = set()
-                for pid in ([pos_id] if pos_id else []):
-                    kb_ids.update(kb_cfg.get("positionKBs", {}).get(pid, []))
-                kb_ids.update(kb_cfg.get("employeeKBs", {}).get(base_id, []))
-
-                if kb_ids:
-                    import boto3 as _b3kb
-                    s3_kb = _b3kb.client("s3")
-                    kb_dir = os.path.join(WORKSPACE, "knowledge")
-                    os.makedirs(kb_dir, exist_ok=True)
-                    kb_soul_lines = []
-                    for kb_id in kb_ids:
-                        try:
-                            kb_item = table.get_item(Key={"PK": "ORG#acme", "SK": f"KB#{kb_id}"}).get("Item")
-                            if not kb_item:
-                                continue
-                            # Build files list: use explicit files array if present,
-                            # otherwise fall back to listing the s3Prefix.
-                            # seed_knowledge.py creates KB items with s3Prefix only (no files array),
-                            # so the s3Prefix fallback is required for freshly seeded deployments.
-                            files_list = kb_item.get("files", [])
-                            if not files_list:
-                                s3_prefix = kb_item.get("s3Prefix", "")
-                                if s3_prefix:
-                                    try:
-                                        resp = s3_kb.list_objects_v2(Bucket=S3_BUCKET, Prefix=s3_prefix)
-                                        for obj in resp.get("Contents", []):
-                                            key = obj["Key"]
-                                            fname = key.split("/")[-1]
-                                            if fname and not fname.startswith("."):
-                                                files_list.append({"s3Key": key, "filename": fname})
-                                    except Exception as list_err:
-                                        logger.warning("KB prefix listing failed for %s: %s", kb_id, list_err)
-                            # Download KB files into workspace/knowledge/{kb_id}/
-                            kb_sub = os.path.join(kb_dir, kb_id)
-                            os.makedirs(kb_sub, exist_ok=True)
-                            for file_ref in files_list:
-                                s3_key = file_ref.get("s3Key", "")
-                                fname = file_ref.get("filename", s3_key.split("/")[-1])
-                                local_path = os.path.join(kb_sub, fname)
-                                if not os.path.isfile(local_path):
-                                    obj = s3_kb.get_object(Bucket=S3_BUCKET, Key=s3_key)
-                                    with open(local_path, "wb") as f:
-                                        f.write(obj["Body"].read())
-                            kb_soul_lines.append(f"- **{kb_item.get('name', kb_id)}**: {os.path.join(kb_sub, '')}")
-                            logger.info("KB injected: %s → %s", kb_id, kb_sub)
-                        except Exception as ke:
-                            logger.warning("KB injection failed for %s: %s", kb_id, ke)
-
-                    # Append KB paths to SOUL.md so agent knows where to look
-                    if kb_soul_lines:
-                        soul_path = os.path.join(WORKSPACE, "SOUL.md")
-                        if os.path.isfile(soul_path):
-                            # Build KB block with specific proactive instructions
-                            kb_lines_text = "\n".join(kb_soul_lines)
-                            # For org-directory KB: inline the content directly into SOUL.md
-                            # Read from S3 (reliable — no EFS path timing issues).
-                            org_dir_inline = ""
-                            if any("org-directory" in line or "Company Directory" in line
-                                   for line in kb_soul_lines):
-                                try:
-                                    org_obj = s3_kb.get_object(
-                                        Bucket=S3_BUCKET,
-                                        Key="_shared/knowledge/org-directory/company-directory.md"
-                                    )
-                                    dir_content = org_obj["Body"].read().decode("utf-8")
-                                    org_dir_inline = (
-                                        "\n\n<!-- COMPANY DIRECTORY (inline) -->\n"
-                                        "The following is the complete ACME Corp employee directory. "
-                                        "Use this to answer any question about colleagues, contacts, "
-                                        "departments, or who to reach for any topic:\n\n"
-                                        + dir_content
-                                    )
-                                    logger.info("Org directory inlined into SOUL.md (%d chars)", len(dir_content))
-                                except Exception as e:
-                                    logger.warning("Org directory inline failed: %s", e)
-                            kb_block = (
-                                "\n\n<!-- KNOWLEDGE BASES -->\n"
-                                "You have access to the following knowledge base documents:\n"
-                                + kb_lines_text
-                                + "\nUse the `file` tool to read these when relevant to the user's question."
-                                + org_dir_inline
-                            )
-                            with open(soul_path, "a") as f:
-                                f.write(kb_block)
+                    # Language + KB injection: ALL moved to workspace_assembler.py
+                    # _build_context_block(). server.py no longer modifies SOUL.md.
 
         except Exception as e:
             logger.warning("Dynamic agent config failed (non-fatal): %s", e)
@@ -888,10 +753,11 @@ def _invoke_openclaw_once(tenant_id: str, message: str, timeout: int = 300) -> d
         except IOError:
             pass
 
-    # Ensure node is on PATH for nvm installs
-    nvm_bin = "/home/ubuntu/.nvm/versions/node/v22.22.1/bin"
-    if os.path.isdir(nvm_bin):
-        env["PATH"] = nvm_bin + ":" + env.get("PATH", "")
+    # Ensure node is on PATH for nvm installs (glob to avoid hardcoded version)
+    import glob as _glob
+    nvm_bins = _glob.glob("/home/ubuntu/.nvm/versions/node/*/bin")
+    if nvm_bins:
+        env["PATH"] = nvm_bins[0] + ":" + env.get("PATH", "")
         env["HOME"] = "/home/ubuntu"
 
     openclaw_cmd = [
@@ -1089,10 +955,200 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/ping":
             self._respond(200, {"status": "Healthy", "time_of_last_update": int(time.time())})
+        elif self.path == "/gateway-dashboard":
+            self._handle_gateway_dashboard()
+        elif self.path == "/gateway-approve-pairing":
+            self._handle_gateway_approve_pairing()
         else:
             self._respond(404, {"error": "not found"})
 
+    def do_DELETE(self):
+        """DELETE /admin/refresh/{emp_id} — clear assembled workspace cache for one employee.
+        Fargate-aware alternative to stop_employee_session (which kills the microVM).
+        After this call, the next /invocations for that employee will re-run
+        workspace_assembler (fresh SOUL, permissions, KB, skills) without restarting the container."""
+        if self.path.startswith("/admin/refresh/"):
+            emp_id = self.path.split("/admin/refresh/")[1].strip("/")
+            if not emp_id:
+                self._respond(400, {"error": "emp_id required"})
+                return
+            evicted = []
+            with _assembly_lock:
+                to_remove = [t for t in _assembled_tenants if emp_id in t]
+                for t in to_remove:
+                    _assembled_tenants.discard(t)
+                    evicted.append(t)
+            logger.info("Admin refresh: evicted %d cached tenants for %s: %s", len(evicted), emp_id, evicted)
+            self._respond(200, {"refreshed": True, "empId": emp_id, "evicted": evicted})
+        elif self.path == "/admin/refresh-all":
+            with _assembly_lock:
+                count = len(_assembled_tenants)
+                _assembled_tenants.clear()
+            logger.info("Admin refresh-all: evicted %d cached tenants", count)
+            self._respond(200, {"refreshed": True, "evictedCount": count})
+        else:
+            self._respond(404, {"error": "not found"})
+
+    def _handle_gateway_dashboard(self):
+        """Run `openclaw dashboard --no-open` and return the dashboard URL.
+        This generates a fresh pairing token each time, so the caller can
+        open the Gateway Console without needing prior pairing setup."""
+        try:
+            env = os.environ.copy()
+            env["HOME"] = os.environ.get("HOME", "/root")
+            env["PATH"] = "/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")
+            result = subprocess.run(
+                [OPENCLAW_BIN, "dashboard", "--no-open"],
+                capture_output=True, text=True, timeout=45, env=env,
+            )
+            output = result.stdout + result.stderr
+            # Extract URL: "Dashboard URL: http://127.0.0.1:18789/#token=abc123..."
+            url_match = re.search(r'(https?://\S+#token=\S+)', output)
+            if url_match:
+                url = url_match.group(1)
+                # Extract components
+                gw_token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
+                dash_token_match = re.search(r'#token=([a-f0-9]+)', url)
+                dash_token = dash_token_match.group(1) if dash_token_match else ""
+                self._respond(200, {
+                    "url": url,
+                    "gatewayToken": gw_token,
+                    "dashboardToken": dash_token,
+                    "port": 18789,
+                })
+            else:
+                logger.warning("gateway-dashboard: no URL in output: %s", output[-200:])
+                self._respond(500, {"error": "Gateway dashboard URL not found", "output": output[-300:]})
+        except subprocess.TimeoutExpired:
+            self._respond(504, {"error": "Gateway dashboard timed out"})
+        except Exception as e:
+            self._respond(500, {"error": str(e)})
+
+    def _handle_gateway_approve_pairing(self):
+        """Auto-approve the most recent pending device pairing request.
+        Called by the admin console after the browser opens the Gateway Console
+        and creates a pending pairing request."""
+        try:
+            env = os.environ.copy()
+            env["HOME"] = os.environ.get("HOME", "/root")
+            env["PATH"] = "/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")
+            gw_token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
+            cmd = [OPENCLAW_BIN, "devices", "approve", "--latest", "--json"]
+            if gw_token:
+                cmd.extend(["--token", gw_token])
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=15, env=env,
+            )
+            output = result.stdout + result.stderr
+            logger.info("gateway-approve-pairing: exit=%d output=%s", result.returncode, output[:300])
+            if result.returncode == 0:
+                try:
+                    data = json.loads(result.stdout)
+                except (json.JSONDecodeError, ValueError):
+                    data = {"raw": output[:300]}
+                self._respond(200, {"approved": True, "detail": data})
+            else:
+                self._respond(200, {"approved": False, "reason": output[:300]})
+        except subprocess.TimeoutExpired:
+            self._respond(504, {"error": "Approve pairing timed out"})
+        except Exception as e:
+            self._respond(500, {"error": str(e)})
+
     def do_POST(self):
+        # Admin refresh via POST (for clients that can't send DELETE)
+        if self.path.startswith("/admin/refresh"):
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            emp_id = payload.get("emp_id", "")
+            if self.path == "/admin/refresh-all" or not emp_id:
+                with _assembly_lock:
+                    count = len(_assembled_tenants)
+                    _assembled_tenants.clear()
+                self._respond(200, {"refreshed": True, "evictedCount": count})
+            else:
+                evicted = []
+                with _assembly_lock:
+                    to_remove = [t for t in _assembled_tenants if emp_id in t]
+                    for t in to_remove:
+                        _assembled_tenants.discard(t)
+                        evicted.append(t)
+                self._respond(200, {"refreshed": True, "empId": emp_id, "evicted": evicted})
+            return
+
+        # ── Channel management (IM connections) ───────────────────────────
+        if self.path == "/admin/channels/add":
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self._respond(400, {"error": "invalid json"})
+                return
+            channel = payload.get("channel", "")
+            if not channel:
+                self._respond(400, {"error": "channel required (telegram, feishu, discord, slack)"})
+                return
+            # Build openclaw channels add command
+            cmd = [OPENCLAW_BIN, "channels", "add", "--channel", channel]
+            for key in ("token", "bot-token", "app-token", "app-id", "app-secret"):
+                val = payload.get(key.replace("-", "_"), payload.get(key, ""))
+                if val:
+                    cmd.extend([f"--{key}", val])
+            try:
+                env = os.environ.copy()
+                env["HOME"] = os.environ.get("HOME", "/root")
+                env["PATH"] = "/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
+                output = result.stdout + result.stderr
+                success = result.returncode == 0
+                logger.info("Channel add %s: exit=%d output=%s", channel, result.returncode, output[:200])
+                self._respond(200 if success else 500, {
+                    "success": success, "channel": channel,
+                    "output": output[:500],
+                })
+            except Exception as e:
+                self._respond(500, {"success": False, "error": str(e)})
+            return
+
+        if self.path == "/admin/channels/remove":
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self._respond(400, {"error": "invalid json"})
+                return
+            channel = payload.get("channel", "")
+            if not channel:
+                self._respond(400, {"error": "channel required"})
+                return
+            try:
+                env = os.environ.copy()
+                env["HOME"] = os.environ.get("HOME", "/root")
+                env["PATH"] = "/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")
+                result = subprocess.run(
+                    [OPENCLAW_BIN, "channels", "remove", "--channel", channel],
+                    capture_output=True, text=True, timeout=15, env=env)
+                logger.info("Channel remove %s: exit=%d", channel, result.returncode)
+                self._respond(200, {"success": result.returncode == 0, "channel": channel})
+            except Exception as e:
+                self._respond(500, {"success": False, "error": str(e)})
+            return
+
+        if self.path == "/admin/channels/list":
+            try:
+                env = os.environ.copy()
+                env["HOME"] = os.environ.get("HOME", "/root")
+                env["PATH"] = "/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")
+                result = subprocess.run(
+                    [OPENCLAW_BIN, "channels", "list"],
+                    capture_output=True, text=True, timeout=15, env=env)
+                self._respond(200, {"output": result.stdout + result.stderr})
+            except Exception as e:
+                self._respond(500, {"error": str(e)})
+            return
+
         if self.path != "/invocations":
             self._respond(404, {"error": "not found"})
             return
@@ -1143,7 +1199,7 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
                 return
 
         # Check session takeover — if admin has taken over, skip agent invocation
-        stack = os.environ.get("STACK_NAME", "openclaw-multitenancy")
+        stack = os.environ.get("STACK_NAME", "openclaw")
         region = os.environ.get("AWS_REGION", "us-east-1")
         session_key = tenant_id[:40]
         try:
@@ -1287,7 +1343,9 @@ class AgentCoreHandler(BaseHTTPRequestHandler):
 
 def main():
     port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), AgentCoreHandler)
+    class ThreadedServer(ThreadingMixIn, HTTPServer):
+        daemon_threads = True
+    server = ThreadedServer(("0.0.0.0", port), AgentCoreHandler)
     logger.info("HTTP server listening on port %d", port)
     logger.info("openclaw binary: %s", OPENCLAW_BIN)
     try:

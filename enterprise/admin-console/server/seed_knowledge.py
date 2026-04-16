@@ -1,5 +1,6 @@
 """Seed DynamoDB with knowledge base metadata."""
 import argparse
+import os
 import boto3
 
 ORG = "ORG#acme"
@@ -34,7 +35,7 @@ def seed(table_name, region):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--table", default="openclaw-enterprise")
-    p.add_argument("--region", default="us-east-2")
+    p.add_argument("--table", default=os.environ.get("DYNAMODB_TABLE", "openclaw"))
+    p.add_argument("--region", default=os.environ.get("AWS_REGION", "us-east-1"))
     a = p.parse_args()
     seed(a.table, a.region)

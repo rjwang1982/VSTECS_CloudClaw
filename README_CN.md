@@ -40,7 +40,7 @@
 | **欧洲（爱尔兰）** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=eu-west-1#/stacks/create/review?stackName=openclaw-bedrock&templateURL=https://sharefile-jiade.s3.cn-northwest-1.amazonaws.com.cn/clawdbot-bedrock.yaml) |
 | **亚太（东京）** | [![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=ap-northeast-1#/stacks/create/review?stackName=openclaw-bedrock&templateURL=https://sharefile-jiade.s3.cn-northwest-1.amazonaws.com.cn/clawdbot-bedrock.yaml) |
 
-> **前提条件**：在 [Bedrock 控制台](https://console.aws.amazon.com/bedrock/) 启用所需模型，并在目标区域创建 EC2 密钥对。
+> **前提条件**：在目标区域创建 EC2 密钥对。Bedrock 模型访问已自动开通，无需手动启用。
 
 ### 部署后操作
 
@@ -169,7 +169,10 @@ WhatsApp 和 Telegram 支持语音消息 — OpenClaw 会转录并回复。
 |------|--------------------------|---------|
 | **Nova 2 Lite**（默认） | $0.30 / $2.50 | 日常任务，比 Claude 便宜 90% |
 | Nova Pro | $0.80 / $3.20 | 性能与成本平衡，支持多模态 |
+| Claude Opus 4.6 | $15.00 / $75.00 | 最强能力，复杂智能体任务 |
+| Claude Opus 4.5 | $15.00 / $75.00 | 深度分析，扩展思维 |
 | Claude Sonnet 4.5 | $3.00 / $15.00 | 复杂推理、编程 |
+| Claude Sonnet 4 | $3.00 / $15.00 | 可靠的编程与分析 |
 | Claude Haiku 4.5 | $1.00 / $5.00 | 快速高效 |
 | DeepSeek R1 | $0.55 / $2.19 | 开源推理模型 |
 | Llama 3.3 70B | — | 开源替代方案 |
@@ -258,7 +261,13 @@ WhatsApp 和 Telegram 支持语音消息 — OpenClaw 会转录并回复。
 
 **本地 Demo**：`python3 demo/console.py` → 打开 http://localhost:8099 查看管理控制台
 
-**[→ 多租户完整文档](README_ENTERPRISE.md)** · **[→ 路线图](ROADMAP.md)**
+**[→ 多租户完整文档 (EN)](README_ENTERPRISE.md)** · **[→ 多租户完整文档 (中文)](README_ENTERPRISE_CN.md)** · **[→ 路线图](ROADMAP.md)**
+
+### EKS (Kubernetes) — 容器原生部署
+
+在 Amazon EKS 上通过 Terraform 部署 OpenClaw 智能体。支持 AWS 全球区域和中国区域。
+
+**[→ EKS 部署指南 (EN)](docs/DEPLOYMENT_EKS.md)** · **[→ EKS 部署指南 (中文)](docs/DEPLOYMENT_EKS_CN.md)**
 
 ### macOS（Apple Silicon）— iOS/macOS 开发
 
