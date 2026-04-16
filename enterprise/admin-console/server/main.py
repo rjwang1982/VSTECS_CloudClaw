@@ -183,7 +183,7 @@ def login(body: LoginRequest):
         if not _hmac.compare_digest(body.password, expected_password):
             raise HTTPException(401, "Invalid password")
 
-    must_change = emp_full.get("mustChangePassword", True)
+    must_change = emp_full.get("mustChangePassword", False)
     token = authmod.create_token(emp_full, must_change_password=must_change)
     return {
         "token": token,
