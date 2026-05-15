@@ -72,7 +72,7 @@ export default function Login() {
               <label className="block text-sm text-text-muted mb-1">Employee ID</label>
               <input
                 type="text" value={empId} onChange={e => setEmpId(e.target.value)}
-                placeholder="vstecs-admin or EMP-001"
+                placeholder="vstecs-admin"
                 className="w-full rounded-lg border border-dark-border bg-dark-bg px-4 py-2.5 text-sm text-text-primary placeholder:text-text-muted focus:border-primary focus:outline-none"
               />
             </div>
