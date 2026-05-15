@@ -98,7 +98,7 @@ _ADMIN_AI_TOOLS = [
         "name": "get_employee_detail",
         "description": "Get full details for one employee: profile, agent config, bindings, recent usage.",
         "inputSchema": {"json": {"type": "object", "required": ["employee_id"], "properties": {
-            "employee_id": {"type": "string", "description": "e.g. emp-carol"},
+            "employee_id": {"type": "string", "description": "e.g. vstecs-fin1"},
         }}}
     },
     {

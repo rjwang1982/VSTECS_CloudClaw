@@ -68,10 +68,10 @@ Created 3 differentiated roles:
 Verified 4 employees across tiers:
 | Employee | Global | Position | Personal | Tools |
 |----------|--------|----------|----------|-------|
-| emp-carol (FA) | 204w | 253w | 0w | web_search, file |
-| emp-ryan (SDE) | 204w | 188w | 0w | 6 tools (full) |
-| emp-jiade (SA) | 204w | 219w | 0w | 6 tools (full) |
-| emp-peter (Exec) | 204w | 248w | 0w | 6 tools (full) |
+| vstecs-fin1 (FA) | 204w | 253w | 0w | web_search, file |
+| vstecs-RDadmin (SDE) | 204w | 188w | 0w | 6 tools (full) |
+| vstecs-admin (SA) | 204w | 219w | 0w | 6 tools (full) |
+| vstecs-exec1 (Exec) | 204w | 248w | 0w | 6 tools (full) |
 
 ### Real Conversations — 20/20 PASS
 All 20 conversations across 4 tiers successful. 131,205 total chars generated.

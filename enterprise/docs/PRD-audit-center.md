@@ -292,7 +292,7 @@ Filters: [Event Type ▾] [Time Range ▾] [Search...] [Export CSV]
 Event list with ALL new types:
   14:32  soul_change      Admin edited pos-sa SOUL (286 chars)
   14:28  tool_permission_change  shell added to pos-sde
-  14:25  agent_refresh    Admin forced refresh for emp-mike
+  14:25  agent_refresh    Admin forced refresh for vstecs-sales1
   ...
 
 Pagination: [Previous] Page 1 of 12 [Next]

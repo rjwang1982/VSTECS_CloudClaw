@@ -124,8 +124,8 @@ export default function Playground() {
       .map(e => ({ label: `${e.name} — ${e.positionName}`, value: `port__${e.id}` }));
     if (opts.length === 0) {
       return [
-        { label: 'Carol Zhang — Finance Analyst', value: 'port__emp-carol' },
-        { label: 'Wang Wu — Software Engineer', value: 'port__emp-w5' },
+        { label: 'Stella Zhu — Finance Analyst', value: 'port__vstecs-fin1' },
+        { label: 'Jason Xu — Software Engineer', value: 'port__vstecs-RDadmin' },
       ];
     }
     return opts;

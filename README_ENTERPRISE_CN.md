@@ -503,9 +503,9 @@ Step 5: Employee chats with their AI agent directly in their IM app
 5. **DynamoDB is in `us-east-2` by default** (AgentCore is `us-east-1`). This is intentional — DynamoDB cross-region access is free and `us-east-2` avoids hitting AgentCore's region during heavy load.
 
 **Verify it works** (after deployment):
-- Playground → Carol Zhang (Finance) → "run git status" → refused ✓
-- Playground → Ryan Park (SDE) → "run git status" → executes ✓
-- Playground → Rachel Li (Legal) → "what new tokens are going live?" → Guardrail blocks ✓
+- Playground → Stella Zhu (Finance) → "run git status" → refused ✓
+- Playground → Jason Xu (SDE) → "run git status" → executes ✓
+- Playground → Wendy Shen (Legal) → "what new tokens are going live?" → Guardrail blocks ✓
 - Playground → WJD (Executive) → same question → answers freely ✓
 
 **If AgentCore returns 500:** check CloudWatch group `/aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT` for `openclaw returned empty output` — wrong openclaw version. Rebuild with `openclaw@2026.3.24`.
@@ -760,7 +760,7 @@ aws ssm start-session --target $INSTANCE_ID --region $REGION \
   --parameters '{"portNumber":["8099"],"localPortNumber":["8199"]}'
 ```
 
-Open **http://localhost:8199** → login with Employee ID `emp-jiade` (admin) and `ADMIN_PASSWORD` from your `.env`.
+Open **http://localhost:8199** → login with Employee ID `vstecs-admin` (admin) and `ADMIN_PASSWORD` from your `.env`.
 
 > **Public access:** Use CloudFront with an Elastic IP on the EC2. Set `PUBLIC_URL` in `/etc/openclaw/env` (e.g. `PUBLIC_URL=https://your-domain.com`) for correct Digital Twin URLs — the admin console reads this file via `EnvironmentFile` in the systemd service.
 
@@ -785,8 +785,8 @@ Employees self-service pair via Portal → Connect IM (QR code). No admin approv
 ## 测试验证
 
 ### 1. SOUL Injection (core differentiator)
-以 **Carol Zhang**（财务）登录 → Chat → "Who are you?" → **"ACME Corp Finance Analyst"**
-以 **Ryan Park**（SDE）登录 → Chat → "Who are you?" → **"ACME Corp Software Engineer"**
+以 **Stella Zhu**（财务）登录 → Chat → "Who are you?" → **"ACME Corp Finance Analyst"**
+以 **Jason Xu**（SDE）登录 → Chat → "Who are you?" → **"ACME Corp Software Engineer"**
 相同 LLM。完全不同的身份。
 
 ### 2. Digital Twin
@@ -795,13 +795,13 @@ Employees self-service pair via Portal → Connect IM (QR code). No admin approv
 关闭 → 隐身标签页立即返回 404
 
 ### 3. Org Directory (Knowledge Base)
-Ask any agent: *"Who should I contact for a code review?"* or *"What does Marcus Bell do?"*
+Ask any agent: *"Who should I contact for a code review?"* or *"What does Andy Liu do?"*
 → Agent reads `kb-org-directory` (seeded into every position) and answers with the right person's name, role, IM channel, and agent capabilities
 → Works out-of-box after running `seed_knowledge_docs.py` — no manual KB assignment needed
 
 ### 4. Permission Boundaries
-Carol Zhang: "Run git status" → **Refused** (Finance, no shell)
-Ryan Park: "Run git status" → **Executed** (SDE, has shell)
+Stella Zhu: "Run git status" → **Refused** (Finance, no shell)
+Jason Xu: "Run git status" → **Executed** (SDE, has shell)
 WJD / Ada: Any command → **Executed** (Executive tier, zero restrictions, Sonnet 4.6)
 
 ### 5. Multi-Runtime
@@ -811,7 +811,7 @@ Login as **Ada** or **WJD** → these route to the Executive AgentCore Runtime:
 - IAM: full S3, all Bedrock models, cross-dept DynamoDB
 
 ### 6. Memory Persistence
-Chat as **JiaDe Wang** (Discord) → come back after 15 min → **agent recalls previous conversation**
+Chat as **Kevin Zhao** (Discord) → come back after 15 min → **agent recalls previous conversation**
 Same memory shared across Discord, Telegram, and Portal.
 
 > **How it works:** Each turn is synced to S3 immediately after the response (not just on session end). The next microVM downloads the workspace at session start and has full context. If memory doesn't appear, re-run `seed_all_workspaces.py` to reset S3 workspace state.
@@ -860,14 +860,14 @@ To add a new KB: Admin Console → Knowledge Base → upload Markdown → Assign
 |-------------|------|------|---------|---------------------|
 | **emp-ada** | **Ada** | **Executive** | **exec-agent · Sonnet 4.6** | **All tools · Full IAM · Feishu + Telegram 🔓** |
 | **emp-wjd** | **WJD** | **Executive** | **exec-agent · Sonnet 4.6** | **All tools · Full IAM · Feishu + Telegram 🔓** |
-| emp-jiade | JiaDe Wang | Admin | standard | Discord → SA Agent ✨ |
-| emp-chris | Chris Morgan | Admin | standard | DevOps Agent (shell + infra tools) |
-| emp-peter | Peter Wu | Manager | standard | Portal/Discord → Executive Agent ✨ |
-| emp-alex | Alex Rivera | Manager | standard | Product dept manager view |
-| emp-mike | Mike Johnson | Manager | standard | Sales dept manager · CRM tools |
-| emp-ryan | Ryan Park | Employee | standard | Slack/Discord → SDE Agent (shell/code) |
-| emp-carol | Carol Zhang | Employee | standard | Telegram → Finance Agent |
-| emp-david | David Park | Employee | standard | Slack → Finance Agent ✨ |
+| vstecs-admin | Kevin Zhao | Admin | standard | Discord → SA Agent ✨ |
+| vstecs-ITadmin | Leo Zhang | Admin | standard | DevOps Agent (shell + infra tools) |
+| vstecs-exec1 | Patrick Tan | Manager | standard | Portal/Discord → Executive Agent ✨ |
+| vstecs-pm1 | Diana Wen | Manager | standard | Product dept manager view |
+| vstecs-sales1 | Henry Luo | Manager | standard | Sales dept manager · CRM tools |
+| vstecs-RDadmin | Jason Xu | Employee | standard | Slack/Discord → SDE Agent (shell/code) |
+| vstecs-fin1 | Stella Zhu | Employee | standard | Telegram → Finance Agent |
+| vstecs-fin2 | Ray Cheng | Employee | standard | Slack → Finance Agent ✨ |
 | **emp-admin** | **Demo Admin** | **Employee** | **exec-agent** | **Unrestricted test account · All tools · install_skill** |
 
 > 🔓 = No tool restrictions · ✨ = Cross-session memory via S3

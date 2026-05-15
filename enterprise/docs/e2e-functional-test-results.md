@@ -41,7 +41,7 @@
 
 | # | 测试场景 | 预期行为 | 验证方式 | 结果 |
 |---|---------|---------|---------|------|
-| T3.1 | Carol simulate 后查询 playground events | 有 >0 条事件 | /playground/events?tenant_id=port__emp-carol count>0 | **FAIL** — count=0 |
+| T3.1 | Carol simulate 后查询 playground events | 有 >0 条事件 | /playground/events?tenant_id=port__vstecs-fin1 count>0 | **FAIL** — count=0 |
 | T3.2 | 全局审计条目包含 invocation/simulate 记录 | 最近 20 条中有相关条目 | 查 detail 含 simulate/playground 或 eventType=agent_invocation | PASS — 17 条 |
 | T3.3 | Audit insights 结构化返回 | insights 数组可解析 | insights 字段存在 | PASS — 1 条 insight |
 

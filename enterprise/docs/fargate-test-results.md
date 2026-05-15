@@ -34,7 +34,7 @@ TOTAL=47 PASS=46 FAIL=1 (98% pass rate)
 
 | Record Type | Count | Example |
 |-------------|-------|---------|
-| USAGE# | 16 | USAGE#emp-carol#2026-04-12, USAGE#emp-ryan#2026-04-12 |
+| USAGE# | 16 | USAGE#vstecs-fin1#2026-04-12, USAGE#vstecs-RDadmin#2026-04-12 |
 | AUDIT# | 173 | agent_invocation events from all 4 tiers |
 | SESSION# | 62 | Active sessions across 15+ employees |
 | CONV# | ~90 | Conversation turns with user+assistant messages |
@@ -43,8 +43,8 @@ TOTAL=47 PASS=46 FAIL=1 (98% pass rate)
 
 1. **All 4 tiers work** — 12 unique employees across 4 Fargate containers, all responded correctly
 2. **SOUL 3-layer assembly works on EFS** — workspace_assembler.py runs on first invocation, subsequent calls use cache
-3. **Multi-tenant isolation works** — same container serves emp-carol, emp-mike, emp-pm01 without cross-contamination
-4. **Memory persistence works** — emp-ryan remembered "Rust" as favorite language, emp-carol remembered "spreadsheets"
+3. **Multi-tenant isolation works** — same container serves vstecs-fin1, vstecs-sales1, emp-pm01 without cross-contamination
+4. **Memory persistence works** — vstecs-RDadmin remembered "Rust" as favorite language, vstecs-fin1 remembered "spreadsheets"
 5. **DynamoDB integration works** — usage, audit, session, conversation records all written correctly
 
 ## Open Issues

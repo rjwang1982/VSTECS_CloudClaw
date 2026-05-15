@@ -29,7 +29,7 @@
 
 | # | Test | Result | Details |
 |---|------|--------|---------|
-| 1 | Admin Login | ✅ PASS | emp-jiade / wjiad, token issued |
+| 1 | Admin Login | ✅ PASS | vstecs-admin / wjiad, token issued |
 | 2 | Organization Data | ✅ PASS | 20 employees, 20 agents, 20 bindings |
 | 3 | Service Status | ✅ PASS | openclaw-admin, tenant-router, bedrock-proxy-h2, openclaw-gateway all active |
 | 4 | Port Listening | ✅ PASS | 8090, 8091, 8099, 18789 all listening |

@@ -17,7 +17,7 @@ All tests use these real personas (seeded in DynamoDB):
 | Persona | Employee ID | Role | Position | Department | Purpose |
 |---------|-------------|------|----------|------------|---------|
 | IT Admin | emp-admin | admin | IT Admin | IT | Full admin operations |
-| Carol | emp-carol | employee | Sales Rep | Sales | Standard employee flow |
+| Carol | vstecs-fin1 | employee | Sales Rep | Sales | Standard employee flow |
 | Bob | emp-bob | manager | Engineering Lead | Engineering | Manager-scoped views |
 | Diana | emp-diana | employee | Executive Assistant | Executive | Executive tier always-on |
 | Eve | emp-eve | employee | New Hire | Engineering | Fresh employee, no agent |
@@ -33,12 +33,12 @@ All tests use these real personas (seeded in DynamoDB):
 | # | Test Case | Steps | Expected | DynamoDB Trace |
 |---|-----------|-------|----------|----------------|
 | A-01 | Admin login | POST `/auth/login` with emp-admin credentials | JWT token returned, role=admin | — |
-| A-02 | Employee login | POST `/auth/login` with emp-carol credentials | JWT token, redirected to `/portal` | — |
+| A-02 | Employee login | POST `/auth/login` with vstecs-fin1 credentials | JWT token, redirected to `/portal` | — |
 | A-03 | Manager login | POST `/auth/login` with emp-bob credentials | JWT token, sees admin console (scoped) | — |
 | A-04 | Wrong password | POST `/auth/login` with bad password | 401 Unauthorized | — |
 | A-05 | First login password change | Login as emp-eve (mustChangePassword=true) | Redirected to `/change-password` | EMP#emp-eve updated |
 | A-06 | Token expiry | Use expired JWT token on any API | 401, redirect to login | — |
-| A-07 | Employee cannot access admin | Login as emp-carol, navigate to `/dashboard` | Redirected to `/portal` | — |
+| A-07 | Employee cannot access admin | Login as vstecs-fin1, navigate to `/dashboard` | Redirected to `/portal` | — |
 | A-08 | Admin password change | Settings > Account > Change Password | Success, new password works | EMP#emp-admin passwordHash updated |
 
 ### 1.2 Dashboard
@@ -61,7 +61,7 @@ All tests use these real personas (seeded in DynamoDB):
 | O-02 | Create position | Org > Positions > Create "QA Engineer" in QA Team | Position created with default SOUL | POS#pos-qa-engineer + AUDIT# |
 | O-03 | Create employee | Org > Employees > Create "Frank" as QA Engineer | Employee + agent auto-provisioned | EMP#emp-frank + AGENT# + BIND# + AUDIT# (TransactWrite) |
 | O-04 | Employee auto-provision | Verify Frank's agent | Agent exists, bound, S3 workspace seeded | S3: _shared/SOUL.md, position/SOUL.md |
-| O-05 | Update employee position | Move Carol from Sales Rep to QA Engineer | Position updated, config version bumped | EMP#emp-carol positionId changed + AUDIT# |
+| O-05 | Update employee position | Move Carol from Sales Rep to QA Engineer | Position updated, config version bumped | EMP#vstecs-fin1 positionId changed + AUDIT# |
 | O-06 | Delete employee (cascade) | Delete Frank (force=true) | Agent + bindings + S3 workspace cleaned | EMP#/AGENT#/BIND# deleted + AUDIT# |
 | O-07 | Department delete guard | Delete Engineering (has employees) | Error: "department has employees" | — |
 | O-08 | Position SOUL edit | Positions > QA Engineer > SOUL tab > Edit | SOUL saved, config version bumped | S3 position SOUL + CONFIG#global-version + AUDIT# |
@@ -288,10 +288,10 @@ All tests use these real personas (seeded in DynamoDB):
 2. Admin: Agents > Configuration > Override Sales Rep position model to Claude Sonnet
 3. Carol (Sales): Send message
    -> Verify: response uses Claude Sonnet (check USAGE# model field)
-4. Admin: Agents > Configuration > Override emp-carol to Claude Opus
+4. Admin: Agents > Configuration > Override vstecs-fin1 to Claude Opus
 5. Carol: Send message
    -> Verify: response uses Claude Opus (employee override > position override)
-6. Admin: Usage > Edit Budget > Set emp-carol budget to $0.01
+6. Admin: Usage > Edit Budget > Set vstecs-fin1 budget to $0.01
 7. Carol: Send expensive message
    -> Verify: budget warning or enforcement (check AUDIT# for budget_exceeded)
 8. Admin: Remove employee override, remove position override
@@ -471,7 +471,7 @@ aws dynamodb query --table-name openclaw-enterprise --region us-east-1 \
 # Check conversation history
 aws dynamodb query --table-name openclaw-enterprise --region us-east-1 \
   --key-condition-expression "PK = :pk AND begins_with(SK, :sk)" \
-  --expression-attribute-values '{":pk":{"S":"ORG#acme"},":sk":{"S":"CONV#personal__emp-carol"}}' \
+  --expression-attribute-values '{":pk":{"S":"ORG#acme"},":sk":{"S":"CONV#personal__vstecs-fin1"}}' \
   --query 'Count'
 
 # Check usage records for today

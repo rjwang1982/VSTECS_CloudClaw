@@ -41,7 +41,7 @@ class TestGetTenantRoles:
         mock_table = MagicMock()
         mock_table.get_item.return_value = {
             "Item": {
-                "id": "emp-ryan",
+                "id": "vstecs-RDadmin",
                 "positionId": "pos-sde",
                 "departmentName": "Backend Team",
                 "role": "employee",
@@ -53,7 +53,7 @@ class TestGetTenantRoles:
             mock_ddb.Table.return_value = mock_table
             mock_boto.resource.return_value = mock_ddb
 
-            roles = get_tenant_roles("openclaw-test", "port__emp-ryan__abc123", region="us-east-2")
+            roles = get_tenant_roles("openclaw-test", "port__vstecs-RDadmin__abc123", region="us-east-2")
 
         assert "employee" in roles
         assert "engineering" in roles  # Backend Team maps to engineering
@@ -65,7 +65,7 @@ class TestGetTenantRoles:
         mock_table = MagicMock()
         mock_table.get_item.return_value = {
             "Item": {
-                "id": "emp-carol",
+                "id": "vstecs-fin1",
                 "positionId": "pos-fa",
                 "departmentName": "Finance",
                 "role": "employee",
@@ -77,7 +77,7 @@ class TestGetTenantRoles:
             mock_ddb.Table.return_value = mock_table
             mock_boto.resource.return_value = mock_ddb
 
-            roles = get_tenant_roles("openclaw-test", "port__emp-carol__def456", region="us-east-2")
+            roles = get_tenant_roles("openclaw-test", "port__vstecs-fin1__def456", region="us-east-2")
 
         assert "finance" in roles
         assert "engineering" not in roles
@@ -105,7 +105,7 @@ class TestGetTenantRoles:
         mock_table = MagicMock()
         mock_table.get_item.return_value = {
             "Item": {
-                "id": "emp-jiade",
+                "id": "vstecs-admin",
                 "positionId": "pos-sa",
                 "departmentName": "Engineering",
                 "role": "admin",
@@ -117,7 +117,7 @@ class TestGetTenantRoles:
             mock_ddb.Table.return_value = mock_table
             mock_boto.resource.return_value = mock_ddb
 
-            roles = get_tenant_roles("openclaw-test", "port__emp-jiade__abc", region="us-east-2")
+            roles = get_tenant_roles("openclaw-test", "port__vstecs-admin__abc", region="us-east-2")
 
         assert "admin" in roles
         assert "management" in roles
@@ -129,7 +129,7 @@ class TestGetTenantRoles:
 
         mock_table = MagicMock()
         mock_table.get_item.return_value = {
-            "Item": {"id": "emp-carol", "positionId": "pos-fa", "departmentName": "Finance", "role": "employee"}
+            "Item": {"id": "vstecs-fin1", "positionId": "pos-fa", "departmentName": "Finance", "role": "employee"}
         }
 
         with patch("skill_loader.boto3") as mock_boto:
@@ -137,10 +137,10 @@ class TestGetTenantRoles:
             mock_ddb.Table.return_value = mock_table
             mock_boto.resource.return_value = mock_ddb
 
-            get_tenant_roles("openclaw-test", "tg__emp-carol__a1b2c3d4e5f6g7h8", region="us-east-2")
+            get_tenant_roles("openclaw-test", "tg__vstecs-fin1__a1b2c3d4e5f6g7h8", region="us-east-2")
 
-        # Should query with emp-carol, not the full tenant_id
-        mock_table.get_item.assert_called_with(Key={"PK": "ORG#acme", "SK": "EMP#emp-carol"})
+        # Should query with vstecs-fin1, not the full tenant_id
+        mock_table.get_item.assert_called_with(Key={"PK": "ORG#acme", "SK": "EMP#vstecs-fin1"})
 
 
 # ═══════════════════════════════════════════════════════════════════════════

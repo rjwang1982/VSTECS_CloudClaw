@@ -85,9 +85,9 @@ Prerequisite: remove date from `derive_tenant_id` hash → stable session IDs.
 
 | Session type | runtimeSessionId | Session Storage | Writeback to S3 | CONV# to DDB | Usage/Audit |
 |-------------|-----------------|----------------|----------------|-------------|-------------|
-| **Main** (Portal + IM) | `emp__emp-carol__<hash>` | Primary workspace | Yes | Yes | Yes |
-| **Twin** (digital twin) | `twin__emp-carol__<hash>` | Isolated workspace | DDB only (OQ5) | Yes | Yes |
-| **Playground** (admin test) | `pgnd__emp-carol__<hash>` | Isolated workspace | No | No | Yes |
+| **Main** (Portal + IM) | `emp__vstecs-fin1__<hash>` | Primary workspace | Yes | Yes | Yes |
+| **Twin** (digital twin) | `twin__vstecs-fin1__<hash>` | Isolated workspace | DDB only (OQ5) | Yes | Yes |
+| **Playground** (admin test) | `pgnd__vstecs-fin1__<hash>` | Isolated workspace | No | No | Yes |
 
 All 3 session types load the same employee's SOUL/memory from S3 at first assembly,
 but Twin and Playground get isolated Session Storage so their conversations don't pollute the main session.
@@ -261,11 +261,11 @@ Options:
 
 ```
 POST /stop-session
-Body: { "emp_id": "emp-carol" }
+Body: { "emp_id": "vstecs-fin1" }
 
 → derive session IDs for all 3 session types (emp__, twin__, pgnd__)
 → call StopRuntimeSession for each active session
-→ return { "stopped": ["emp__emp-carol__...", ...] }
+→ return { "stopped": ["emp__vstecs-fin1__...", ...] }
 ```
 
 ### New API: Admin Console `/api/v1/agents/{emp_id}/refresh`

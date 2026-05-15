@@ -160,7 +160,7 @@ Admin Console → Agent Factory → agent-helpdesk → [Start Always-on]
 Admin Console → Agent Factory → agent-helpdesk → Assignments tab
   ├── [+ Assign Employee]
   │   ├── Search: Carol Zhang
-  │   └── [Assign] → SSM: /openclaw/{stack}/tenants/emp-carol/always-on-agent = agent-helpdesk
+  │   └── [Assign] → SSM: /openclaw/{stack}/tenants/vstecs-fin1/always-on-agent = agent-helpdesk
   ├── Current Assignments:
   │   ├── Carol Zhang (Finance) — assigned 2026-04-01 — [Remove]
   │   ├── Ryan Park (Engineering) — assigned 2026-04-03 — [Remove]

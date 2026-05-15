@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'OpenClaw Multi-Tenant Platform — Infrastructure (EC2 Gateway + ECR + SSM + CloudWatch). AgentCore Runtime is created separately after pushing the container image.'
+Description: 'OpenClaw Multi-Tenant Platform - Infrastructure (EC2 Gateway + ECR + SSM + CloudWatch). AgentCore Runtime is created separately after pushing the container image.'
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -480,7 +480,7 @@ Resources:
               ArnLike:
                 aws:SourceArn: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:*"
       # Least-privilege: no managed policies. All permissions are explicit below.
-      # BedrockAgentCoreFullAccess is intentionally NOT used — it grants
+      # BedrockAgentCoreFullAccess is intentionally NOT used - it grants
       # create/delete/update Runtime permissions that the container does not need.
       Policies:
         - PolicyName: AgentCoreExecutionPolicy
@@ -924,7 +924,7 @@ Resources:
           # Clear token from environment
           unset GATEWAY_TOKEN
 
-          # Create SSM access script (retrieves token from SSM at runtime — never stored on disk)
+          # Create SSM access script (retrieves token from SSM at runtime - never stored on disk)
           cat > /home/ubuntu/ssm-portforward.sh << 'SSMEOF'
           #!/bin/bash
           IMDS_TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
@@ -974,7 +974,7 @@ Resources:
 
 
 # ===========================================================================
-# ECS — Always-on Shared Agents (Fargate)
+# ECS - Always-on Shared Agents (Fargate)
 #
 # Always-on agents run as Fargate tasks instead of docker containers on EC2.
 # Each task self-registers its private IP in SSM on startup so the Tenant
@@ -991,7 +991,7 @@ Resources:
   # ---- EFS: persistent workspace storage for always-on containers ----
   # Each always-on container mounts EFS at /mnt/efs.
   # entrypoint.sh uses /mnt/efs/{emp_id}/workspace/ as the workspace path,
-  # replacing the S3 sync watchdog — writes are durable immediately (NFS write-through).
+  # replacing the S3 sync watchdog - writes are durable immediately (NFS write-through).
 
   AlwaysOnEFSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -1133,7 +1133,7 @@ Resources:
 
   # ---- Per-tier Task Roles (container-level AWS API permissions) ----
   # The existing AlwaysOnEcsTaskRole is kept as the EXECUTION role (ECR pull + CloudWatch).
-  # These 4 roles are TASK roles — different AWS API permissions per security tier.
+  # These 4 roles are TASK roles - different AWS API permissions per security tier.
   # admin_always_on.py selects the role based on employee's position tier.
 
   AlwaysOnTaskRoleStandard:
@@ -1329,7 +1329,7 @@ Resources:
   AlwaysOnSGStandard:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: "Always-on Standard tier — HTTPS outbound only"
+      GroupDescription: "Always-on Standard tier - HTTPS outbound only"
       VpcId: !If [CreateNewVPC, !Ref OpenClawVPC, !Ref ExistingVpcId]
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -1346,7 +1346,7 @@ Resources:
         - IpProtocol: tcp
           FromPort: 2049
           ToPort: 2049
-          SourceSecurityGroupId: !Ref AlwaysOnEFSSecurityGroup
+          DestinationSecurityGroupId: !Ref AlwaysOnEFSSecurityGroup
           Description: "NFS to EFS"
       Tags:
         - Key: Name
@@ -1355,7 +1355,7 @@ Resources:
   AlwaysOnSGRestricted:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: "Always-on Restricted tier — AWS services only, no internet"
+      GroupDescription: "Always-on Restricted tier - AWS services only, no internet"
       VpcId: !If [CreateNewVPC, !Ref OpenClawVPC, !Ref ExistingVpcId]
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -1372,7 +1372,7 @@ Resources:
         - IpProtocol: tcp
           FromPort: 2049
           ToPort: 2049
-          SourceSecurityGroupId: !Ref AlwaysOnEFSSecurityGroup
+          DestinationSecurityGroupId: !Ref AlwaysOnEFSSecurityGroup
           Description: "NFS to EFS"
       Tags:
         - Key: Name
@@ -1381,7 +1381,7 @@ Resources:
   AlwaysOnSGEngineering:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: "Always-on Engineering tier — full outbound"
+      GroupDescription: "Always-on Engineering tier - full outbound"
       VpcId: !If [CreateNewVPC, !Ref OpenClawVPC, !Ref ExistingVpcId]
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -1399,7 +1399,7 @@ Resources:
   AlwaysOnSGExecutive:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: "Always-on Executive tier — full outbound"
+      GroupDescription: "Always-on Executive tier - full outbound"
       VpcId: !If [CreateNewVPC, !Ref OpenClawVPC, !Ref ExistingVpcId]
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -1455,7 +1455,7 @@ Resources:
       SourceSecurityGroupId: !Ref AlwaysOnSGExecutive
       Description: "Executive tier to EFS"
 
-  # Allow ECS tasks to reach EFS (legacy shared SG — kept for backward compat)
+  # Allow ECS tasks to reach EFS (legacy shared SG - kept for backward compat)
   AlwaysOnEFSIngressFromECS:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
@@ -1480,7 +1480,7 @@ Resources:
         - Key: Name
           Value: !Sub "${AWS::StackName}-always-on-cluster"
 
-  # ECS Task Definition — image + env defaults; overridden per-agent at RunTask time
+  # ECS Task Definition - image + env defaults; overridden per-agent at RunTask time
   AlwaysOnTaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
@@ -1590,7 +1590,7 @@ Outputs:
       Name: !Sub "${AWS::StackName}-MultitenancyEcrRepositoryUri"
 
   AgentContainerExecutionRoleArn:
-    Description: "ARN of the IAM role the Agent Container runs as inside AgentCore Runtime — pass this to 'aws bedrock-agentcore create-agent-runtime --role-arn'"
+    Description: "ARN of the IAM role the Agent Container runs as inside AgentCore Runtime - pass this to 'aws bedrock-agentcore create-agent-runtime --role-arn'"
     Value: !GetAtt AgentContainerExecutionRole.Arn
     Export:
       Name: !Sub "${AWS::StackName}-AgentContainerExecutionRoleArn"

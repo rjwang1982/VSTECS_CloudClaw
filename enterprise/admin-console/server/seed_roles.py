@@ -7,11 +7,11 @@ ORG = "ORG#acme"
 
 # Role assignments per design doc
 ROLES = {
-    "emp-jiade": "admin",    # JiaDe Wang — IT Admin (SA lead)
-    "emp-chris": "admin",    # Chris Morgan — DevOps lead, also admin
-    "emp-alex":  "manager",  # Alex Rivera — Product dept head
-    "emp-mike":  "manager",  # Mike Johnson — Sales dept head
-    "emp-jenny": "manager",  # Jenny Liu — HR dept head
+    "vstecs-admin":   "admin",    # Kevin Zhao — IT Admin (SA lead)
+    "vstecs-ITadmin": "admin",    # Leo Zhang — DevOps lead, also admin
+    "vstecs-pm1":     "manager",  # Diana Wen — Product dept head
+    "vstecs-sales1":  "manager",  # Henry Luo — Sales dept head
+    "vstecs-hr1":     "manager",  # Megan Xie — HR dept head
     # Everyone else: employee (default)
 }
 

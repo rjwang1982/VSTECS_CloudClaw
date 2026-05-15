@@ -116,13 +116,13 @@ def _send_im_notification(channel: str, channel_user_id: str, message: str) -> N
 class UserMappingRequest(BaseModel):
     channel: str       # discord, telegram, slack, whatsapp
     channelUserId: str  # platform-specific user ID
-    employeeId: str     # emp-carol, emp-ryan, etc.
+    employeeId: str     # vstecs-fin1, vstecs-RDadmin, etc.
 
 
 class PairingApproveRequest(BaseModel):
     channel: str          # discord, telegram, feishu, slack, whatsapp
     pairingCode: str      # e.g. KFDAF3GN
-    employeeId: str       # e.g. emp-carol
+    employeeId: str       # e.g. vstecs-fin1
     channelUserId: str = ""   # numeric platform user ID (from pairing message)
     pairingUserId: str = ""   # username/handle (e.g. "wujiade4444") for dm_ mapping
 

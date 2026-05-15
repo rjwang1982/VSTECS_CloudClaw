@@ -40,14 +40,14 @@ Every capability (Tool or Skill) is represented as:
   "name": "Web Search" | "Excel Generator",
   "type": "tool" | "skill",                    // NEW: distinguish tools from skills
   "description": "...",
-  "author": "OpenClaw Core" | "ACME IT" | "emp-ryan",
+  "author": "OpenClaw Core" | "ACME IT" | "vstecs-RDadmin",
   "category": "information" | "productivity" | "development" | ...,
 
   // Lifecycle
   "status": "official" | "approved" | "under_review" | "community" | "rejected",
-  "submittedBy": null | "emp-ryan",            // null = platform-provided
+  "submittedBy": null | "vstecs-RDadmin",            // null = platform-provided
   "submittedAt": null | "2026-04-13T...",
-  "reviewedBy": null | "emp-jiade",
+  "reviewedBy": null | "vstecs-admin",
   "reviewedAt": null | "2026-04-13T...",
   "securityScan": null | { "passed": true, "scanner": "skill-vetter", "date": "..." },
 

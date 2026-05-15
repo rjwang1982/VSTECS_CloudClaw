@@ -76,8 +76,8 @@ cost = (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1
         # ... departments without entry → use global
     },
     "employees": {
-        "emp-peter": 200.0,           # CEO needs more
-        "emp-jiade": 100.0,           # SA needs more
+        "vstecs-exec1": 200.0,           # CEO needs more
+        "vstecs-admin": 100.0,           # SA needs more
         # ... employees without entry → use department budget
     }
 }

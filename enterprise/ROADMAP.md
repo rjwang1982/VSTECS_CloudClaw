@@ -143,14 +143,14 @@ Portal uses `emp-xxx` as user_id, so base ID extraction works. But IM channels u
 
 | Channel | user_id example | base ID extracted | S3 path | Status |
 |---------|----------------|-------------------|---------|--------|
-| Portal | emp-carol | emp-carol | emp-carol/workspace/ | ✅ Works |
+| Portal | vstecs-fin1 | vstecs-fin1 | vstecs-fin1/workspace/ | ✅ Works |
 | WhatsApp | 8613800138000 | 8613800138000 | 8613800138000/workspace/ | ❌ Wrong path |
 | Telegram | 123456789 | 123456789 | 123456789/workspace/ | ❌ Wrong path |
 | Slack | U0123ABC | U0123ABC | U0123ABC/workspace/ | ❌ Wrong path |
 
 **Design:** SSM reverse mapping from channel user_id to employee_id:
 ```
-/openclaw/{stack}/user-mapping/wa__8613800138000 → emp-carol
+/openclaw/{stack}/user-mapping/wa__8613800138000 → vstecs-fin1
 /openclaw/{stack}/user-mapping/tg__123456789 → emp-z3
 ```
 

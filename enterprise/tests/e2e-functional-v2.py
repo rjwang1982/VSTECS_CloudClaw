@@ -75,11 +75,11 @@ def do_auth():
     except: pass
     if not pw:
         print("[FATAL] Cannot read ADMIN_PASSWORD"); sys.exit(1)
-    r = api("POST", "/auth/login", {"employeeId": "emp-jiade", "password": pw})
+    r = api("POST", "/auth/login", {"employeeId": "vstecs-admin", "password": pw})
     TOKEN = r.get("token", "")
     if not TOKEN:
         print(f"[FATAL] Login failed: {r}"); sys.exit(1)
-    log("Authenticated as admin (emp-jiade)")
+    log("Authenticated as admin (vstecs-admin)")
     return pw
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -89,12 +89,12 @@ def test_g1(admin_pw):
     print("\n== G1: Authentication & Authorization ==")
 
     # 1.1 Admin login
-    r = api("POST", "/auth/login", {"employeeId": "emp-jiade", "password": admin_pw})
+    r = api("POST", "/auth/login", {"employeeId": "vstecs-admin", "password": admin_pw})
     if r.get("token"): tpass("1.1", "Admin login returns JWT token")
     else: tfail("1.1", f"Admin login failed: {r}")
 
     # 1.2 Wrong password
-    r = api("POST", "/auth/login", {"employeeId": "emp-jiade", "password": "wrongpassword"}, expect_fail=True)
+    r = api("POST", "/auth/login", {"employeeId": "vstecs-admin", "password": "wrongpassword"}, expect_fail=True)
     if r.get("_status") in [401, 403] or "Invalid" in str(r): tpass("1.2", "Wrong password rejected")
     else: tfail("1.2", f"Wrong password not rejected: {r}")
 
@@ -105,7 +105,7 @@ def test_g1(admin_pw):
 
     # 1.4 /auth/me returns identity
     r = api("GET", "/auth/me")
-    if r.get("id") == "emp-jiade" and "Architect" in str(r.get("positionName", "")):
+    if r.get("id") == "vstecs-admin" and "Architect" in str(r.get("positionName", "")):
         tpass("1.4", f"/auth/me returns correct identity: {r.get('name')}, {r.get('positionName')}")
     else: tfail("1.4", f"/auth/me wrong: {r}")
 
@@ -115,11 +115,11 @@ def test_g1(admin_pw):
     else: tfail("1.5", f"No token not rejected: {r}")
 
     # 1.6 Employee token scope
-    emp_r = api("POST", "/auth/login", {"employeeId": "emp-carol", "password": admin_pw})
+    emp_r = api("POST", "/auth/login", {"employeeId": "vstecs-fin1", "password": admin_pw})
     emp_token = emp_r.get("token", "")
     if emp_token:
         me = api("GET", "/auth/me", token_override=emp_token)
-        if me.get("id") == "emp-carol": tpass("1.6", f"Employee login works: {me.get('name')}")
+        if me.get("id") == "vstecs-fin1": tpass("1.6", f"Employee login works: {me.get('name')}")
         else: tfail("1.6", f"Employee /auth/me wrong: {me}")
     else: tskip("1.6", "Employee login failed (same password?)")
 
@@ -208,23 +208,23 @@ def test_g3():
     if "Account Executive" in ae and "CRM" in ae: tpass("3.4", "AE SOUL has Account Executive + CRM")
     else: tfail("3.4", f"AE SOUL missing content")
 
-    pc = api("GET", "/playground/pipeline/emp-carol")
+    pc = api("GET", "/playground/pipeline/vstecs-fin1")
     gw = pc.get("soul", {}).get("globalWords", 0)
     pw = pc.get("soul", {}).get("positionWords", 0)
-    if gw > 0 and pw > 0: tpass("3.5", f"Carol 2-layer: global={gw}w position={pw}w")
-    else: tfail("3.5", f"Carol layers: g={gw} p={pw}")
+    if gw > 0 and pw > 0: tpass("3.5", f"Stella 2-layer: global={gw}w position={pw}w")
+    else: tfail("3.5", f"Stella layers: g={gw} p={pw}")
 
-    pj = api("GET", "/playground/pipeline/emp-jiade")
+    pj = api("GET", "/playground/pipeline/vstecs-admin")
     jg = pj.get("soul", {}).get("globalWords", 0)
     jp = pj.get("soul", {}).get("positionWords", 0)
     jpers = pj.get("soul", {}).get("personalWords", 0)
-    if jg > 0 and jp > 0: tpass("3.6", f"JiaDe 3-layer: g={jg} p={jp} pers={jpers}")
-    else: tfail("3.6", f"JiaDe layers: g={jg} p={jp} pers={jpers}")
+    if jg > 0 and jp > 0: tpass("3.6", f"Kevin 3-layer: g={jg} p={jp} pers={jpers}")
+    else: tfail("3.6", f"Kevin layers: g={jg} p={jp} pers={jpers}")
 
-    pr = api("GET", "/playground/pipeline/emp-ryan")
+    pr = api("GET", "/playground/pipeline/vstecs-RDadmin")
     if pc.get("soul", {}).get("positionWords", 0) != pr.get("soul", {}).get("positionWords", 0):
         tpass("3.7", f"Different position SOUL words: Carol={pw} Ryan={pr.get('soul',{}).get('positionWords',0)}")
-    else: tfail("3.7", "Carol and Ryan have same positionWords")
+    else: tfail("3.7", "Stella and Ryan have same positionWords")
 
     # 3.8 Global SOUL write-read
     orig = api("GET", "/security/global-soul")
@@ -244,29 +244,29 @@ def test_g3():
 def test_g4():
     print("\n== G4: Per-Position Tool Differentiation ==")
 
-    pc = api("GET", "/playground/pipeline/emp-carol")
+    pc = api("GET", "/playground/pipeline/vstecs-fin1")
     ct = pc.get("planA", {}).get("tools", [])
     if "shell" not in ct and "code_execution" not in ct:
         tpass("4.1", f"FA tools (no shell): {ct}")
     else: tfail("4.1", f"FA has forbidden tools: {ct}")
 
-    pr = api("GET", "/playground/pipeline/emp-ryan")
+    pr = api("GET", "/playground/pipeline/vstecs-RDadmin")
     rt = pr.get("planA", {}).get("tools", [])
     if "shell" in rt and "code_execution" in rt and "file_write" in rt:
         tpass("4.2", f"SDE tools (has shell+code+write): {rt}")
     else: tfail("4.2", f"SDE missing tools: {rt}")
 
-    pm = api("GET", "/playground/pipeline/emp-mike")
+    pm = api("GET", "/playground/pipeline/vstecs-sales1")
     mt = pm.get("planA", {}).get("tools", [])
     if "shell" not in mt and "code_execution" not in mt: tpass("4.3", f"AE tools (no shell): {mt}")
     else: tfail("4.3", f"AE has forbidden tools: {mt}")
 
-    pch = api("GET", "/playground/pipeline/emp-chris")
+    pch = api("GET", "/playground/pipeline/vstecs-ITadmin")
     cht = pch.get("planA", {}).get("tools", [])
     if "shell" in cht: tpass("4.4", f"DevOps has shell: {cht}")
     else: tfail("4.4", f"DevOps missing shell: {cht}")
 
-    pp = api("GET", "/playground/pipeline/emp-peter")
+    pp = api("GET", "/playground/pipeline/vstecs-exec1")
     pt = pp.get("planA", {}).get("tools", [])
     if len(pt) >= 6: tpass("4.5", f"Executive has all {len(pt)} tools: {pt}")
     else: tfail("4.5", f"Executive only {len(pt)} tools: {pt}")
@@ -276,7 +276,7 @@ def test_g4():
     orig_list = orig_tools.get("tools", ["web_search", "file"])
     api("PUT", "/security/positions/pos-fa/tools", {"profile": "basic", "tools": ["web_search", "file", "browser"]})
     time.sleep(1)
-    check = api("GET", "/playground/pipeline/emp-carol")
+    check = api("GET", "/playground/pipeline/vstecs-fin1")
     new_tools = check.get("planA", {}).get("tools", [])
     api("PUT", "/security/positions/pos-fa/tools", {"profile": "basic", "tools": orig_list})  # restore
     if "browser" in new_tools: tpass("4.6", f"FA tools modified to include browser, then restored")
@@ -292,42 +292,42 @@ def test_g5():
         return api("POST", "/playground/send", {"tenant_id": tenant, "message": msg, "mode": "simulate"})
 
     # 5.1 FA refuses shell
-    r = sim("port__emp-carol", "Run the command: ls -la /tmp")
+    r = sim("port__vstecs-fin1", "Run the command: ls -la /tmp")
     resp = r.get("response", "").lower()
     if r.get("source") == "simulate-bedrock" and any(w in resp for w in ["cannot", "can't", "not able", "don't have", "finance", "spreadsheet", "engineering"]):
         tpass("5.1", "FA (Carol) refuses shell command")
     else: tfail("5.1", f"FA did not refuse shell. source={r.get('source')} resp={resp[:150]}")
 
     # 5.2 SDE writes code
-    r = sim("port__emp-ryan", "Write a Python function that reverses a string")
+    r = sim("port__vstecs-RDadmin", "Write a Python function that reverses a string")
     resp = r.get("response", "")
     if r.get("source") == "simulate-bedrock" and any(w in resp for w in ["def ", "return ", "reverse", "```"]):
         tpass("5.2", "SDE (Ryan) writes code")
     else: tfail("5.2", f"SDE no code. source={r.get('source')} resp={resp[:150]}")
 
     # 5.3 AE redirects tech
-    r = sim("port__emp-mike", "Show me the Kubernetes deployment YAML for our microservices")
+    r = sim("port__vstecs-sales1", "Show me the Kubernetes deployment YAML for our microservices")
     resp = r.get("response", "").lower()
     if any(w in resp for w in ["sa team", "solutions architect", "technical", "connect", "engineering", "outside"]):
         tpass("5.3", "AE (Mike) redirects tech question to SA")
     else: tfail("5.3", f"AE did not redirect. resp={resp[:150]}")
 
     # 5.4 FA handles finance
-    r = sim("port__emp-carol", "What is the Q2 budget variance for Engineering?")
+    r = sim("port__vstecs-fin1", "What is the Q2 budget variance for Engineering?")
     resp = r.get("response", "").lower()
     if any(w in resp for w in ["budget", "variance", "analysis", "q2", "financial", "table"]):
         tpass("5.4", "FA (Carol) responds with finance context")
     else: tfail("5.4", f"FA no finance context. resp={resp[:150]}")
 
     # 5.5 HR handles HR
-    r = sim("port__emp-jenny", "New hire onboarding checklist")
+    r = sim("port__vstecs-hr1", "New hire onboarding checklist")
     resp = r.get("response", "").lower()
     if any(w in resp for w in ["onboarding", "checklist", "hr", "policy", "new hire", "orientation"]):
         tpass("5.5", "HR (Jenny) responds with HR content")
     else: tfail("5.5", f"HR no HR context. resp={resp[:150]}")
 
     # 5.6 Legal mentions compliance
-    r = sim("port__emp-rachel", "Review this NDA template for compliance issues")
+    r = sim("port__vstecs-legal1", "Review this NDA template for compliance issues")
     resp = r.get("response", "").lower()
     if any(w in resp for w in ["legal", "compliance", "nda", "contract", "review", "clause"]):
         tpass("5.6", "Legal (Rachel) responds with legal context")
@@ -339,24 +339,24 @@ def test_g5():
 def test_g6():
     print("\n== G6: Workspace & Memory ==")
 
-    r = api("GET", "/workspace/file?key=emp-carol/workspace/USER.md")
+    r = api("GET", "/workspace/file?key=vstecs-fin1/workspace/USER.md")
     c = r.get("content", "")
-    if "Carol Zhang" in c and "Finance" in c: tpass("6.1", "Carol USER.md: name + role present")
-    else: tfail("6.1", f"Carol USER.md: {c[:100]}")
+    if "Stella Zhu" in c and "Finance" in c: tpass("6.1", "Stella USER.md: name + role present")
+    else: tfail("6.1", f"Stella USER.md: {c[:100]}")
 
-    r = api("GET", "/workspace/file?key=emp-carol/workspace/MEMORY.md")
+    r = api("GET", "/workspace/file?key=vstecs-fin1/workspace/MEMORY.md")
     c = r.get("content", "")
-    if "budget" in c.lower() or "Q2" in c or "Engineering" in c: tpass("6.2", "Carol MEMORY.md: seeded context present")
-    else: tfail("6.2", f"Carol MEMORY.md: {c[:100]}")
+    if "budget" in c.lower() or "Q2" in c or "Engineering" in c: tpass("6.2", "Stella MEMORY.md: seeded context present")
+    else: tfail("6.2", f"Stella MEMORY.md: {c[:100]}")
 
-    r = api("GET", "/workspace/file?key=emp-jiade/workspace/USER.md")
+    r = api("GET", "/workspace/file?key=vstecs-admin/workspace/USER.md")
     c = r.get("content", "")
-    if "JiaDe" in c and "Architect" in c: tpass("6.3", "JiaDe USER.md: name + role")
-    else: tfail("6.3", f"JiaDe USER.md: {c[:100]}")
+    if "Kevin" in c and "Architect" in c: tpass("6.3", "Kevin USER.md: name + role")
+    else: tfail("6.3", f"Kevin USER.md: {c[:100]}")
 
     # 6.4 Write → read-back
     test_content = f"# E2E Test\nTimestamp: {int(time.time())}"
-    key = "emp-carol/workspace/_e2e_test.md"
+    key = "vstecs-fin1/workspace/_e2e_test.md"
     api("PUT", "/workspace/file", {"key": key, "content": test_content})
     rb = api("GET", f"/workspace/file?key={key}")
     if rb.get("content", "").strip() == test_content.strip(): tpass("6.4", "Write-readback exact match")
@@ -370,18 +370,18 @@ def test_g6():
     else: tfail("6.5", "File still exists after S3 delete")
 
     # 6.6 Workspace tree
-    r = api("GET", "/workspace/tree?agent_id=agent-fa-carol")
+    r = api("GET", "/workspace/tree?agent_id=agent-fa-fin1")
     tree_str = json.dumps(r)
     if "USER.md" in tree_str or "MEMORY.md" in tree_str: tpass("6.6", "Workspace tree contains expected files")
     else: tfail("6.6", f"Workspace tree: {tree_str[:200]}")
 
     # 6.7 Agent memory overview
-    r = api("GET", "/agents/agent-fa-carol/memory")
+    r = api("GET", "/agents/agent-fa-fin1/memory")
     if isinstance(r, dict) and ("memoryMdSize" in r or "totalFiles" in r or "size" in json.dumps(r)):
         tpass("6.7", f"Agent memory overview returns data")
     else: tfail("6.7", f"Agent memory overview: {r}")
 
-    # 6.8 Employee scope (Carol can't read JiaDe's files) — may not be enforced in admin
+    # 6.8 Employee scope (Carol can't read Kevin's files) — may not be enforced in admin
     tpass("6.8", "Workspace scope check (admin has full access by design)")
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -390,25 +390,25 @@ def test_g6():
 def test_g7():
     print("\n== G7: Playground 3 Modes ==")
 
-    r = api("POST", "/playground/send", {"tenant_id": "port__emp-carol", "message": "hello", "mode": "simulate"})
+    r = api("POST", "/playground/send", {"tenant_id": "port__vstecs-fin1", "message": "hello", "mode": "simulate"})
     if r.get("source") == "simulate-bedrock": tpass("7.1", "Simulate mode: source=simulate-bedrock")
     else: tfail("7.1", f"Simulate source: {r.get('source')}")
 
-    r = api("POST", "/playground/send", {"tenant_id": "port__emp-jiade", "message": "How many agents are running?", "mode": "admin"})
+    r = api("POST", "/playground/send", {"tenant_id": "port__vstecs-admin", "message": "How many agents are running?", "mode": "admin"})
     resp = r.get("response", "")
     if len(resp) > 20: tpass("7.2", f"Admin mode: {len(resp)} char response")
     else: tfail("7.2", f"Admin mode empty: {resp[:100]}")
 
-    r = api("GET", "/playground/pipeline/emp-carol")
+    r = api("GET", "/playground/pipeline/vstecs-fin1")
     if "soul" in r and "planA" in r and "model" in r: tpass("7.3", "Pipeline has soul+planA+model")
     else: tfail("7.3", f"Pipeline missing fields: {list(r.keys())}")
 
-    pr = api("GET", "/playground/pipeline/emp-ryan")
+    pr = api("GET", "/playground/pipeline/vstecs-RDadmin")
     if r.get("planA",{}).get("tools") != pr.get("planA",{}).get("tools"):
         tpass("7.4", "Different employees get different pipeline tools")
-    else: tfail("7.4", "Carol and Ryan have identical pipeline tools")
+    else: tfail("7.4", "Stella and Ryan have identical pipeline tools")
 
-    ev = api("GET", "/playground/events?tenant_id=port__emp-carol&seconds=300")
+    ev = api("GET", "/playground/events?tenant_id=port__vstecs-fin1&seconds=300")
     if "events" in ev: tpass("7.5", f"Playground events endpoint works (count={ev.get('count',0)})")
     else: tfail("7.5", f"Playground events: {ev}")
 
@@ -527,7 +527,7 @@ def test_g9():
         else: tpass("9.7", "Budget update API accepted (value may resolve differently)")
     else: tskip("9.7", "No budgets to update")
 
-    mb = api("GET", "/usage/my-budget?emp_id=emp-carol")
+    mb = api("GET", "/usage/my-budget?emp_id=vstecs-fin1")
     if isinstance(mb, dict) and ("budget" in mb or "remaining" in mb or "source" in mb):
         tpass("9.8", f"My-budget: {mb}")
     else: tfail("9.8", f"My-budget: {mb}")
@@ -647,7 +647,7 @@ def test_g11():
     if isinstance(sess, list): tpass("11.7", f"Sessions: {len(sess)}")
     else: tfail("11.7", f"Sessions: {sess}")
 
-    q = api("GET", "/agents/agent-fa-carol/quality")
+    q = api("GET", "/agents/agent-fa-fin1/quality")
     if isinstance(q, dict): tpass("11.8", f"Quality score: {q}")
     else: tfail("11.8", f"Quality: {q}")
 
@@ -678,7 +678,7 @@ def test_g12():
     else: tfail("12.5", f"User mappings: {um}")
 
     # 12.6 Create mapping → verify → delete
-    api("POST", "/bindings/user-mappings", {"channel": "e2e-test", "channelUserId": "e2e-user-123", "employeeId": "emp-carol"})
+    api("POST", "/bindings/user-mappings", {"channel": "e2e-test", "channelUserId": "e2e-user-123", "employeeId": "vstecs-fin1"})
     check = api("GET", "/bindings/user-mappings")
     found = any(m.get("channelUserId") == "e2e-user-123" for m in (check if isinstance(check, list) else []))
     api("DELETE", "/bindings/user-mappings?channel=e2e-test&channelUserId=e2e-user-123")
@@ -781,10 +781,10 @@ def test_g15():
     if depts_found >= 2: tpass("15.2", f"Admin AI lists departments ({depts_found} found)")
     else: tfail("15.2", f"Admin AI departments: {resp[:150]}")
 
-    r = api("POST", "/admin-ai/chat", {"message": "Show me Carol Zhang's SOUL configuration"})
+    r = api("POST", "/admin-ai/chat", {"message": "Show me Stella Zhu's SOUL configuration"})
     resp = r.get("response", "")
     if "finance" in resp.lower() or "carol" in resp.lower() or "analyst" in resp.lower():
-        tpass("15.3", f"Admin AI reads Carol's SOUL context")
+        tpass("15.3", f"Admin AI reads Stella's SOUL context")
     else: tfail("15.3", f"Admin AI SOUL: {resp[:150]}")
 
     # History check (we sent 3 messages above)
@@ -803,14 +803,14 @@ def test_g15():
 def test_g16(admin_pw):
     print("\n== G16: Portal ==")
 
-    emp_r = api("POST", "/auth/login", {"employeeId": "emp-carol", "password": admin_pw})
+    emp_r = api("POST", "/auth/login", {"employeeId": "vstecs-fin1", "password": admin_pw})
     emp_token = emp_r.get("token", "")
     if emp_token: tpass("16.1", "Employee Carol login")
-    else: tfail("16.1", f"Carol login failed: {emp_r}"); return
+    else: tfail("16.1", f"Stella login failed: {emp_r}"); return
 
     prof = api("GET", "/portal/profile", token_override=emp_token)
     prof_name = prof.get("name") or prof.get("employee", {}).get("name", "")
-    if "Carol" in str(prof_name): tpass("16.2", f"Portal profile: {prof_name}")
+    if "Stella" in str(prof_name): tpass("16.2", f"Portal profile: {prof_name}")
     else: tfail("16.2", f"Portal profile: {prof}")
 
     usage = api("GET", "/portal/usage", token_override=emp_token)
@@ -845,7 +845,7 @@ def test_g16(admin_pw):
 
 def test_g17(admin_pw):
     print("\n== G17: Digital Twin ==")
-    emp_r = api("POST", "/auth/login", {"employeeId": "emp-carol", "password": admin_pw})
+    emp_r = api("POST", "/auth/login", {"employeeId": "vstecs-fin1", "password": admin_pw})
     emp_token = emp_r.get("token", "")
     if not emp_token: tskip("17.1-17.4", "Cannot login as Carol"); return
 
@@ -880,7 +880,7 @@ def test_g18(admin_pw):
     else: tpass("18.1", f"Approvals endpoint responds: {type(approvals)}")
 
     # 18.2 Create request
-    emp_r = api("POST", "/auth/login", {"employeeId": "emp-carol", "password": admin_pw})
+    emp_r = api("POST", "/auth/login", {"employeeId": "vstecs-fin1", "password": admin_pw})
     emp_token = emp_r.get("token", "")
     if emp_token:
         req = api("POST", "/portal/requests/create", {"type": "tool_access", "tool": "shell", "reason": "E2E test"}, token_override=emp_token)
@@ -954,7 +954,7 @@ def test_g20(admin_pw):
     # 20.3 Modify tools → pipeline reflects
     api("PUT", "/security/positions/pos-sde/tools", {"profile": "advanced", "tools": ["web_search", "shell", "browser", "file", "file_write"]})
     time.sleep(1)
-    pipe = api("GET", "/playground/pipeline/emp-ryan")
+    pipe = api("GET", "/playground/pipeline/vstecs-RDadmin")
     tools = pipe.get("planA", {}).get("tools", [])
     api("PUT", "/security/positions/pos-sde/tools", {"profile": "advanced", "tools": ["web_search", "shell", "browser", "file", "file_write", "code_execution"]})
     if "code_execution" not in tools: tpass("20.3", "Tools change reflected in pipeline (removed code_execution)")
@@ -963,7 +963,7 @@ def test_g20(admin_pw):
     # 20.4 Simulate → audit count increases
     before = api("GET", "/audit/entries?limit=50")
     before_count = len(before) if isinstance(before, list) else 0
-    api("POST", "/playground/send", {"tenant_id": "port__emp-carol", "message": "test", "mode": "simulate"})
+    api("POST", "/playground/send", {"tenant_id": "port__vstecs-fin1", "message": "test", "mode": "simulate"})
     time.sleep(2)
     after = api("GET", "/audit/entries?limit=50")
     after_count = len(after) if isinstance(after, list) else 0
@@ -985,32 +985,32 @@ def test_g20(admin_pw):
 def test_g21():
     print("\n== G21: Memory Read & Persistence ==")
 
-    r = api("GET", "/workspace/file?key=emp-carol/workspace/MEMORY.md")
+    r = api("GET", "/workspace/file?key=vstecs-fin1/workspace/MEMORY.md")
     c = r.get("content", "")
     keywords = ["budget", "Q2", "Engineering"]
     found = [k for k in keywords if k.lower() in c.lower()]
-    if len(found) >= 2: tpass("21.1", f"Carol MEMORY.md has seeded context: {found}")
-    else: tfail("21.1", f"Carol MEMORY.md missing context ({len(c)} chars, found: {found})")
+    if len(found) >= 2: tpass("21.1", f"Stella MEMORY.md has seeded context: {found}")
+    else: tfail("21.1", f"Stella MEMORY.md missing context ({len(c)} chars, found: {found})")
 
-    r = api("GET", "/workspace/file?key=emp-jiade/workspace/MEMORY.md")
+    r = api("GET", "/workspace/file?key=vstecs-admin/workspace/MEMORY.md")
     c = r.get("content", "")
-    if len(c) > 10: tpass("21.2", f"JiaDe MEMORY.md has content ({len(c)} chars)")
-    else: tfail("21.2", f"JiaDe MEMORY.md empty or missing")
+    if len(c) > 10: tpass("21.2", f"Kevin MEMORY.md has content ({len(c)} chars)")
+    else: tfail("21.2", f"Kevin MEMORY.md empty or missing")
 
-    r = api("GET", "/agents/agent-fa-carol/memory")
+    r = api("GET", "/agents/agent-fa-fin1/memory")
     if isinstance(r, dict): tpass("21.3", f"Agent memory overview: {list(r.keys())[:5]}")
     else: tfail("21.3", f"Agent memory: {r}")
 
     # 21.4 Portal profile memory preview
     # (need Carol's token but we're admin — check if portal/profile works for admin viewing Carol)
     # Use the pipeline instead which shows personalWords
-    pipe = api("GET", "/playground/pipeline/emp-carol")
+    pipe = api("GET", "/playground/pipeline/vstecs-fin1")
     if "soul" in pipe: tpass("21.4", f"Pipeline shows memory layer info: personalWords={pipe.get('soul',{}).get('personalWords',0)}")
     else: tfail("21.4", f"Pipeline: {pipe}")
 
     # 21.5 S3 round-trip
     ts = str(int(time.time()))
-    key = f"emp-carol/workspace/_e2e_memory_rt_{ts}.md"
+    key = f"vstecs-fin1/workspace/_e2e_memory_rt_{ts}.md"
     content = f"# Memory Round-Trip Test\nTimestamp: {ts}"
     api("PUT", "/workspace/file", {"key": key, "content": content})
     rb = api("GET", f"/workspace/file?key={key}")
@@ -1018,7 +1018,7 @@ def test_g21():
     if rb.get("content", "").strip() == content.strip(): tpass("21.5", "Memory S3 round-trip: write→read→delete OK")
     else: tfail("21.5", f"Round-trip mismatch")
 
-    r = api("GET", "/agents/agent-fa-carol/memory")
+    r = api("GET", "/agents/agent-fa-fin1/memory")
     tpass("21.6", f"Daily memory files check: {r}")
 
 def test_g22():
@@ -1083,14 +1083,14 @@ def test_g23():
     else: tfail("23.4", "No audit after security change")
 
     # 23.5 FA no shell in pipeline
-    pipe = api("GET", "/playground/pipeline/emp-carol")
+    pipe = api("GET", "/playground/pipeline/vstecs-fin1")
     tools = pipe.get("planA", {}).get("tools", [])
     if "shell" not in tools and "code_execution" not in tools and "file_write" not in tools:
         tpass("23.5", f"FA pipeline enforces no shell/code/write: {tools}")
     else: tfail("23.5", f"FA has forbidden tools: {tools}")
 
     # 23.6 SDE has all tools
-    pipe2 = api("GET", "/playground/pipeline/emp-ryan")
+    pipe2 = api("GET", "/playground/pipeline/vstecs-RDadmin")
     tools2 = pipe2.get("planA", {}).get("tools", [])
     if "shell" in tools2 and "code_execution" in tools2 and "file_write" in tools2:
         tpass("23.6", f"SDE pipeline has full tools: {tools2}")
@@ -1100,7 +1100,7 @@ def test_g23():
     orig = api("GET", "/security/positions/pos-fa/tools").get("tools", ["web_search", "file"])
     api("PUT", "/security/positions/pos-fa/tools", {"profile": "basic", "tools": ["web_search", "file", "browser"]})
     time.sleep(1)
-    check = api("GET", "/playground/pipeline/emp-carol")
+    check = api("GET", "/playground/pipeline/vstecs-fin1")
     api("PUT", "/security/positions/pos-fa/tools", {"profile": "basic", "tools": orig})
     if "browser" in check.get("planA", {}).get("tools", []):
         tpass("23.7", "FA tools modified (added browser) → pipeline updated → restored")
@@ -1195,7 +1195,7 @@ def test_g25():
 def test_g26(admin_pw):
     print("\n== G26: Portal Chat ==")
 
-    emp_r = api("POST", "/auth/login", {"employeeId": "emp-carol", "password": admin_pw})
+    emp_r = api("POST", "/auth/login", {"employeeId": "vstecs-fin1", "password": admin_pw})
     emp_token = emp_r.get("token", "")
     if not emp_token: tskip("26.1-26.5", "Cannot login as Carol"); return
 
@@ -1242,7 +1242,7 @@ def test_g27():
 def test_g28():
     print("\n== G28: Agent Quality & Activity ==")
 
-    q = api("GET", "/agents/agent-fa-carol/quality")
+    q = api("GET", "/agents/agent-fa-fin1/quality")
     if isinstance(q, dict): tpass("28.1", f"Quality score: {q}")
     else: tfail("28.1", f"Quality: {q}")
 
@@ -1261,7 +1261,7 @@ def test_g28():
         tpass("28.3", f"Health system: {sys}")
     else: tfail("28.3", f"Health system empty: {h}")
 
-    a = api("GET", "/agents/agent-fa-carol")
+    a = api("GET", "/agents/agent-fa-fin1")
     if "status" in a: tpass("28.4", f"Agent detail status: {a.get('status')}")
     else: tfail("28.4", f"Agent detail: {list(a.keys())[:5]}")
 

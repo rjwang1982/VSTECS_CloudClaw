@@ -46,7 +46,7 @@ DOCS = {
 - Sev-2: 1 hour response, on-call team
 - Sev-3: Next business day
 """),
-        ("code-of-conduct.md", """# ACME Corp Code of Conduct
+        ("code-of-conduct.md", """# VSTECS Corp Code of Conduct
 
 ## Core Values
 1. **Customer Obsession** — Every decision starts with customer impact
@@ -70,7 +70,7 @@ DOCS = {
 - [ ] Complete security training
 - [ ] Set up development environment
 - [ ] Meet your manager and team
-- [ ] Review ACME Corp Code of Conduct
+- [ ] Review VSTECS Corp Code of Conduct
 
 ## Week 1
 - [ ] Complete all compliance training modules
@@ -253,7 +253,7 @@ TechCorp — 500-employee SaaS company, $50M ARR
         ("nda-template.md", """# Non-Disclosure Agreement Template
 
 ## Parties
-- **Disclosing Party**: ACME Corp
+- **Disclosing Party**: VSTECS Corp
 - **Receiving Party**: [COUNTERPARTY NAME]
 
 ## Confidential Information
@@ -303,7 +303,7 @@ All non-public information disclosed by either party, including but not limited 
 """),
     ],
     "_shared/knowledge/org-directory/": [
-        ("company-directory.md", """# ACME Corp — Company Directory
+        ("company-directory.md", """# VSTECS Corp — Company Directory
 
 This is the official employee directory. Use it to find who to contact for any topic,
 draft introductions, or understand each person's role and AI agent capabilities.
@@ -312,50 +312,50 @@ draft introductions, or understand each person's role and AI agent capabilities.
 
 ## Engineering
 
-### JiaDe Wang — Solutions Architect · Engineering (Admin)
-- **Employee ID**: emp-jiade  · **Employee No**: EMP-001
+### Kevin Zhao — Solutions Architect · Engineering (Admin)
+- **Employee ID**: vstecs-admin  · **Employee No**: EMP-001
 - **Role**: Solutions Architect — enterprise AI solutions, AWS Bedrock, AgentCore deployments. Also IT Admin.
 - **Agent capabilities**: architecture diagrams, cost calculations, deep research, jina-reader
 - **IM channels**: Discord, Slack
 - **Best for**: Enterprise AI architecture, Bedrock/AgentCore questions, OpenClaw Enterprise demos, IT support
 
-### Marcus Bell — Solutions Architect · Engineering
-- **Employee ID**: emp-marcus  · **Employee No**: EMP-002
+### Andy Liu — Solutions Architect · Engineering
+- **Employee ID**: vstecs-sa1  · **Employee No**: EMP-002
 - **Role**: Solutions Architect — pre-sales technical lead, architecture reviews, customer POCs
 - **Agent capabilities**: architecture diagrams, cost calculations, deep research, jina-reader, web search
 - **IM channels**: Slack, Telegram
 - **Best for**: AWS architecture questions, customer technical proposals, solution design reviews
 
-### Daniel Kim — Solutions Architect · Engineering
-- **Employee ID**: emp-daniel  · **Employee No**: EMP-003
+### Brian Feng — Solutions Architect · Engineering
+- **Employee ID**: vstecs-sa2  · **Employee No**: EMP-003
 - **Role**: Solutions Architect — cloud migration projects, infrastructure cost optimization
 - **Agent capabilities**: architecture diagrams, deep research, jina-reader
 - **IM channels**: Slack
 - **Best for**: Cloud migration plans, architecture tradeoffs, cost optimization recommendations
 
-### Ryan Park — Software Engineer · Backend Team
-- **Employee ID**: emp-ryan  · **Employee No**: EMP-004
+### Jason Xu — Software Engineer · Backend Team
+- **Employee ID**: vstecs-RDadmin  · **Employee No**: EMP-004
 - **Role**: Backend Software Engineer — API design, microservices, code review
 - **Agent capabilities**: GitHub PR review, code analysis, deep research, shell commands
 - **IM channels**: Slack, Discord
 - **Best for**: Code reviews, backend architecture, debugging, technical implementation questions
 
-### Sophie Turner — Software Engineer · Backend Team
-- **Employee ID**: emp-sophie  · **Employee No**: EMP-005
+### Tina Huang — Software Engineer · Backend Team
+- **Employee ID**: vstecs-dev1  · **Employee No**: EMP-005
 - **Role**: Software Engineer — frontend and backend development, testing
 - **Agent capabilities**: GitHub PR, code review, deep research
 - **IM channels**: Slack
 - **Best for**: Frontend/backend code questions, PR reviews
 
-### Chris Morgan — DevOps Engineer · Platform Team (Admin)
-- **Employee ID**: emp-chris  · **Employee No**: EMP-007
+### Leo Zhang — DevOps Engineer · Platform Team (Admin)
+- **Employee ID**: vstecs-ITadmin  · **Employee No**: EMP-007
 - **Role**: DevOps Engineer — infrastructure, CI/CD, cloud operations. Also IT Admin.
 - **Agent capabilities**: Terraform, Docker, Kubernetes, GitHub Actions, shell
 - **IM channels**: Slack, Telegram
 - **Best for**: Infrastructure issues, CI/CD pipelines, cloud ops, VPN/credential resets
 
-### Peter Wu — Executive · Engineering
-- **Employee ID**: emp-peter  · **Employee No**: EMP-031
+### Patrick Tan — Executive · Engineering
+- **Employee ID**: vstecs-exec1  · **Employee No**: EMP-031
 - **Role**: Executive (Engineering leadership) — strategic decisions, cross-team coordination
 - **Agent capabilities**: web search, deep research, jina-reader, full tool access (no restrictions)
 - **IM channels**: Discord, Portal
@@ -365,15 +365,15 @@ draft introductions, or understand each person's role and AI agent capabilities.
 
 ## Product
 
-### Alex Rivera — Product Manager · Product (Manager)
-- **Employee ID**: emp-alex  · **Employee No**: EMP-015
+### Diana Wen — Product Manager · Product (Manager)
+- **Employee ID**: vstecs-pm1  · **Employee No**: EMP-015
 - **Role**: Product Manager — product roadmap, requirements, feature prioritization. Dept head.
 - **Agent capabilities**: Jira queries, deep research, jina-reader
 - **IM channels**: Slack
 - **Best for**: Product requirements, roadmap questions, feature specs, sprint planning
 
-### Priya Patel — Product Manager · Product
-- **Employee ID**: emp-priya  · **Employee No**: EMP-014
+### Nina Gao — Product Manager · Product
+- **Employee ID**: vstecs-pm2  · **Employee No**: EMP-014
 - **Role**: Product Manager — user research synthesis, transcript analysis, roadmap items
 - **Agent capabilities**: Jira queries, transcript analysis, deep research, jina-reader
 - **IM channels**: Slack, Discord
@@ -383,15 +383,15 @@ draft introductions, or understand each person's role and AI agent capabilities.
 
 ## Sales
 
-### Mike Johnson — Account Executive · Enterprise Sales (Manager)
-- **Employee ID**: emp-mike  · **Employee No**: EMP-011
+### Henry Luo — Account Executive · Enterprise Sales (Manager)
+- **Employee ID**: vstecs-sales1  · **Employee No**: EMP-011
 - **Role**: Account Executive — Fortune 500 accounts, deal management, competitive analysis. Sales head.
 - **Agent capabilities**: CRM queries, web search, jina-reader
 - **IM channels**: WhatsApp, Slack
 - **Best for**: CRM data, competitive analysis, deal strategy, enterprise proposals
 
-### Sarah Kim — Account Executive · Enterprise Sales
-- **Employee ID**: emp-sarah  · **Employee No**: EMP-012
+### Ivy Sun — Account Executive · Enterprise Sales
+- **Employee ID**: vstecs-sales2  · **Employee No**: EMP-012
 - **Role**: Account Executive — SMB and mid-market accounts, product demos
 - **Agent capabilities**: CRM queries, web search, jina-reader
 - **IM channels**: WhatsApp
@@ -401,15 +401,15 @@ draft introductions, or understand each person's role and AI agent capabilities.
 
 ## Finance
 
-### Carol Zhang — Finance Analyst · Finance
-- **Employee ID**: emp-carol  · **Employee No**: EMP-016
+### Stella Zhu — Finance Analyst · Finance
+- **Employee ID**: vstecs-fin1  · **Employee No**: EMP-016
 - **Role**: Finance Analyst — budget tracking, financial reports, SAP ERP data
 - **Agent capabilities**: SAP connector (read-only), Excel report generation, financial analysis
 - **IM channels**: Slack, Telegram
 - **Best for**: Budget reports, financial data queries, Excel financial models, expense analysis
 
-### David Park — Finance Analyst · Finance
-- **Employee ID**: emp-david  · **Employee No**: EMP-017
+### Ray Cheng — Finance Analyst · Finance
+- **Employee ID**: vstecs-fin2  · **Employee No**: EMP-017
 - **Role**: Finance Analyst — SAP ERP data, budget monitoring, Excel reports
 - **Agent capabilities**: SAP connector (read-only), Excel report generation, budget tracking
 - **IM channels**: Slack
@@ -419,8 +419,8 @@ draft introductions, or understand each person's role and AI agent capabilities.
 
 ## HR & Admin
 
-### Jenny Liu — HR Specialist · HR & Admin (Manager)
-- **Employee ID**: emp-jenny  · **Employee No**: EMP-018
+### Megan Xie — HR Specialist · HR & Admin (Manager)
+- **Employee ID**: vstecs-hr1  · **Employee No**: EMP-018
 - **Role**: HR Specialist — onboarding, leave policies, employee experience. HR dept head.
 - **Agent capabilities**: web search, email drafting, policy lookup
 - **IM channels**: Slack
@@ -430,8 +430,8 @@ draft introductions, or understand each person's role and AI agent capabilities.
 
 ## Customer Success
 
-### Emma Chen — Customer Success Manager · Customer Success
-- **Employee ID**: emp-emma  · **Employee No**: EMP-019
+### Cathy Bai — Customer Success Manager · Customer Success
+- **Employee ID**: vstecs-csm1  · **Employee No**: EMP-019
 - **Role**: CSM — enterprise account QBRs, health scoring, churn prevention
 - **Agent capabilities**: CRM queries, web search, Slack bridge, jina-reader
 - **IM channels**: Slack, WhatsApp
@@ -441,8 +441,8 @@ draft introductions, or understand each person's role and AI agent capabilities.
 
 ## Legal & Compliance
 
-### Rachel Li — Legal Counsel · Legal & Compliance
-- **Employee ID**: emp-rachel  · **Employee No**: EMP-021
+### Wendy Shen — Legal Counsel · Legal & Compliance
+- **Employee ID**: vstecs-legal1  · **Employee No**: EMP-021
 - **Role**: Legal Counsel — GDPR compliance, vendor contracts, IP protection
 - **Agent capabilities**: deep research, jina-reader, contract analysis
 - **IM channels**: Slack
@@ -466,13 +466,13 @@ draft introductions, or understand each person's role and AI agent capabilities.
 
 | Department | Head | Key Contacts |
 |------------|------|-------------|
-| Engineering | Peter Wu | JiaDe Wang (SA+Admin), Marcus Bell (SA), Ryan Park (SDE), Chris Morgan (DevOps+Admin) |
-| Product | Alex Rivera | Alex Rivera (PM), Priya Patel (PM) |
-| Sales | Mike Johnson | Mike Johnson (AE), Sarah Kim (AE) |
-| Finance | (CFO) | Carol Zhang, David Park |
-| HR & Admin | Jenny Liu | Jenny Liu |
-| Customer Success | (VP CS) | Emma Chen |
-| Legal | (CLO) | Rachel Li |
+| Engineering | Patrick Tan | Kevin Zhao (SA+Admin), Andy Liu (SA), Jason Xu (SDE), Leo Zhang (DevOps+Admin) |
+| Product | Diana Wen | Diana Wen (PM), Nina Gao (PM) |
+| Sales | Henry Luo | Henry Luo (AE), Ivy Sun (AE) |
+| Finance | (CFO) | Stella Zhu, Ray Cheng |
+| HR & Admin | Megan Xie | Megan Xie |
+| Customer Success | (VP CS) | Cathy Bai |
+| Legal | (CLO) | Wendy Shen |
 
 ---
 

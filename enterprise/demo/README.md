@@ -31,15 +31,15 @@ Login with any employee ID. Password can be anything (demo mode accepts all).
 |-------------|------|------|-------------|
 | emp-z3 | Zhang San | Admin | Full Admin Console (19 pages) |
 | emp-lin | Lin Xiaoyu | Manager | Dashboard scoped to Product dept |
-| emp-mike | Mike Johnson | Manager | Dashboard scoped to Sales dept |
+| vstecs-sales1 | Henry Luo | Manager | Dashboard scoped to Sales dept |
 | emp-w5 | Wang Wu | Employee | Portal: SDE Agent chat |
-| emp-carol | Carol Zhang | Employee | Portal: Finance Agent chat |
-| emp-emma | Emma Chen | Employee | Portal: CSM Agent chat |
+| vstecs-fin1 | Stella Zhu | Employee | Portal: Finance Agent chat |
+| vstecs-csm1 | Cathy Bai | Employee | Portal: CSM Agent chat |
 
 ## Scenarios to Try
 
 1. Login as `emp-z3` (Admin) → explore all 19 admin pages
-2. Login as `emp-carol` (Employee) → chat in Portal, see permission denial for shell
+2. Login as `vstecs-fin1` (Employee) → chat in Portal, see permission denial for shell
 3. Open SOUL Editor → see three-layer identity injection (Global locked, Position editable, Personal)
 4. Open Audit Center → AI Insights tab → see anomaly detection results
 5. Open Usage & Cost → compare $65/mo vs ChatGPT $500/mo

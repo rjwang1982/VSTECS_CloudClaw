@@ -29,16 +29,16 @@
 
 ```
 ECS Cluster: {stack}-always-on
-├── Service: ao-emp-daniel   → 1 container (Executive tier)
+├── Service: ao-vstecs-sa2   → 1 container (Executive tier)
 │   ├── OpenClaw Gateway (:18789) — 直连 Daniel 的飞书 bot
 │   ├── server.py (:8080) — Guardrail + 审计 + /admin/* endpoints
-│   ├── EFS Access Point: /emp-daniel (硬隔离)
+│   ├── EFS Access Point: /vstecs-sa2 (硬隔离)
 │   ├── Task Role: executive-task-role
 │   └── Security Group: executive-sg (允许公网出站)
 │
-├── Service: ao-emp-carol    → 1 container (Restricted tier)
+├── Service: ao-vstecs-fin1    → 1 container (Restricted tier)
 │   ├── Gateway — 直连 Carol 的 Telegram bot
-│   ├── EFS Access Point: /emp-carol
+│   ├── EFS Access Point: /vstecs-fin1
 │   ├── Task Role: restricted-task-role (只读 S3/DDB)
 │   └── Security Group: restricted-sg (禁止公网出站)
 │
@@ -49,7 +49,7 @@ ECS Cluster: {stack}-always-on
 
 ```
 Serverless Agent (S3):
-  s3://{bucket}/emp-daniel/workspace/
+  s3://{bucket}/vstecs-sa2/workspace/
     ├── SOUL.md (Global + Position + Personal)
     ├── PERSONAL_SOUL.md
     ├── MEMORY.md
@@ -57,7 +57,7 @@ Serverless Agent (S3):
     └── output/
 
 Always-On Agent (EFS):
-  /mnt/efs/emp-daniel/workspace/
+  /mnt/efs/vstecs-sa2/workspace/
     ├── SOUL.md (Global + Position + Personal)
     ├── PERSONAL_SOUL.md ← 独立，可不同
     ├── MEMORY.md ← 独立
@@ -234,9 +234,9 @@ Agent Factory → Daniel Kim → Deploy Mode
 **[Save] 触发：**
 
 1. DynamoDB `EMP#{emp_id}` 更新 `alwaysOnEnabled: true`
-2. `efs.create_access_point(RootDirectory=/emp-daniel, PosixUser=1000)`
-3. `ecs.register_task_definition(ao-emp-daniel)` — tier 模板 + emp_id env + Access Point + Role + SG
-4. `ecs.create_service(ao-emp-daniel, desiredCount=1)`
+2. `efs.create_access_point(RootDirectory=/vstecs-sa2, PosixUser=1000)`
+3. `ecs.register_task_definition(ao-vstecs-sa2)` — tier 模板 + emp_id env + Access Point + Role + SG
+4. `ecs.create_service(ao-vstecs-sa2, desiredCount=1)`
 5. 容器启动 → 从 S3 bootstrap MEMORY 到 EFS（首次迁移）
 6. 写 AUDIT# (always_on_enabled)
 
@@ -295,12 +295,12 @@ Security Center → Fargate Agents
 ```json
 {
   "PK": "ORG#acme",
-  "SK": "EMP#emp-daniel",
+  "SK": "EMP#vstecs-sa2",
   "name": "Daniel Kim",
   "positionId": "pos-sa",
   "alwaysOnEnabled": true,
   "alwaysOnTier": "executive",
-  "alwaysOnServiceName": "ao-emp-daniel",
+  "alwaysOnServiceName": "ao-vstecs-sa2",
   "alwaysOnAccessPointId": "fsap-xxxxxx",
   "alwaysOnStatus": "running",
   "imCredentials": {
@@ -324,8 +324,8 @@ Security Center → Fargate Agents
 **USAGE# — 区分 agent_type：**
 
 ```
-USAGE#emp-daniel/serverless#2026-04-14  → Serverless Agent 用量
-USAGE#emp-daniel/always-on#2026-04-14   → Always-On Agent 用量
+USAGE#vstecs-sa2/serverless#2026-04-14  → Serverless Agent 用量
+USAGE#vstecs-sa2/always-on#2026-04-14   → Always-On Agent 用量
 ```
 
 ### 5.2 EFS Access Points
@@ -334,15 +334,15 @@ USAGE#emp-daniel/always-on#2026-04-14   → Always-On Agent 用量
 每个 always-on 员工一个：
   AccessPoint: fsap-daniel
     FileSystemId: fs-xxx
-    RootDirectory: /emp-daniel
+    RootDirectory: /vstecs-sa2
     PosixUser: {Uid: 1000, Gid: 1000}
 ```
 
 ### 5.3 SSM Parameters (仅 endpoint 注册)
 
 ```
-/openclaw/{stack}/always-on/ao-emp-daniel/endpoint = http://10.0.1.x:8080
-/openclaw/{stack}/always-on/ao-emp-daniel/gateway-token = xxx
+/openclaw/{stack}/always-on/ao-vstecs-sa2/endpoint = http://10.0.1.x:8080
+/openclaw/{stack}/always-on/ao-vstecs-sa2/gateway-token = xxx
 ```
 
 IM 凭证不再存 SSM，改存 DynamoDB EMP#.imCredentials（KMS 加密）。

@@ -315,11 +315,11 @@ def _ensure_workspace_assembled(tenant_id: str) -> None:
 
         # Extract base employee ID for S3 paths
         # Tenant ID formats:
-        #   port__emp-carol__bbee1f93  → base = emp-carol (Portal, 3 parts)
-        #   tg__emp-w5__a1b2c3d4      → base = emp-w5 (Telegram, 3 parts)
+        #   port__vstecs-fin1__bbee1f93  → base = vstecs-fin1 (Portal, 3 parts)
+        #   tg__vstecs-dev1__a1b2c3d4    → base = vstecs-dev1 (Telegram, 3 parts)
         #   unknown__1484960930608578580 → base = 1484960930608578580 (Discord via H2 Proxy, 2 parts)
         #   actions__a                 → base = a (H2 Proxy fallback, 2 parts)
-        #   emp-carol                  → base = emp-carol (direct)
+        #   vstecs-fin1                → base = vstecs-fin1 (direct)
         base_id = tenant_id
         parts = tenant_id.split("__")
         if len(parts) >= 3:

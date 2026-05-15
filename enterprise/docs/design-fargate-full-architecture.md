@@ -172,7 +172,7 @@ ECS Cluster: {stack}-always-on
 ```
 EFS FileSystem: {stack}-always-on-workspace
 ├── /mnt/efs/
-│   ├── emp-carol/
+│   ├── vstecs-fin1/
 │   │   └── workspace/
 │   │       ├── SOUL.md (assembled)
 │   │       ├── PERSONAL_SOUL.md
@@ -183,7 +183,7 @@ EFS FileSystem: {stack}-always-on-workspace
 │   │       ├── output/
 │   │       │   └── Q2-budget.xlsx
 │   │       └── skills/ (loaded by skill_loader)
-│   ├── emp-ryan/
+│   ├── vstecs-RDadmin/
 │   │   └── workspace/ (same structure)
 │   └── _shared/
 │       └── memory/ (shared agent memory, e.g., helpdesk)

@@ -193,7 +193,7 @@ test_knowledge_base.py:
    → verify stop_employee_session called for each employee in position
 
 6. test_admin_refresh_endpoint:
-   POST /admin/refresh-agent/emp-carol → verify stop_employee_session called
+   POST /admin/refresh-agent/vstecs-fin1 → verify stop_employee_session called
 
 7. test_portal_refresh_rate_limit:
    POST /portal/refresh-agent twice within 5 min → second returns 429

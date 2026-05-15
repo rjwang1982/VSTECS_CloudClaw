@@ -10,10 +10,10 @@
 
 | # | 场景 | 操作 | 预期 | 验证方式 |
 |---|------|------|------|---------|
-| 1.1 | Admin 登录 | POST /auth/login (emp-jiade + 正确密码) | 返回 JWT token | token 非空 |
-| 1.2 | 错误密码 | POST /auth/login (emp-jiade + wrong) | 401 Invalid password | HTTP 401 |
+| 1.1 | Admin 登录 | POST /auth/login (vstecs-admin + 正确密码) | 返回 JWT token | token 非空 |
+| 1.2 | 错误密码 | POST /auth/login (vstecs-admin + wrong) | 401 Invalid password | HTTP 401 |
 | 1.3 | 不存在的员工 | POST /auth/login (emp-ghost) | 404 Employee not found | HTTP 404 或 detail |
-| 1.4 | /auth/me 返回身份 | GET /auth/me (admin token) | 返回 id=emp-jiade, role=admin, positionName=Solutions Architect | 字段匹配 |
+| 1.4 | /auth/me 返回身份 | GET /auth/me (admin token) | 返回 id=vstecs-admin, role=admin, positionName=Solutions Architect | 字段匹配 |
 | 1.5 | 无 token 访问 | GET /org/employees (无 Authorization header) | 401 | HTTP 401 |
 | 1.6 | Manager scope 隔离 | 用 manager 员工登录，查员工列表 | 只看到本部门员工，不能看到其他部门 | 返回数 < 20 |
 
@@ -44,8 +44,8 @@
 | 3.2 | Finance Analyst 岗位 SOUL | S3 读取 positions/pos-fa/SOUL.md | 包含 "Finance Analyst" + "spreadsheet" + "No shell commands" | grep |
 | 3.3 | Software Engineer 岗位 SOUL | S3 读取 positions/pos-sde/SOUL.md | 包含 "Software Engineer" + "shell" + "code" | grep |
 | 3.4 | Account Executive 岗位 SOUL | S3 读取 positions/pos-ae/SOUL.md | 包含 "Account Executive" + "CRM" + "No shell commands" | grep |
-| 3.5 | Carol pipeline 2-layer merge | GET /playground/pipeline/emp-carol | globalWords>0 AND positionWords>0 | 数值检查 |
-| 3.6 | JiaDe pipeline 3-layer check | GET /playground/pipeline/emp-jiade | globalWords>0, positionWords>0, personalWords>=0 | 三值都返回 |
+| 3.5 | Carol pipeline 2-layer merge | GET /playground/pipeline/vstecs-fin1 | globalWords>0 AND positionWords>0 | 数值检查 |
+| 3.6 | JiaDe pipeline 3-layer check | GET /playground/pipeline/vstecs-admin | globalWords>0, positionWords>0, personalWords>=0 | 三值都返回 |
 | 3.7 | 不同岗位 SOUL 词数不同 | 比较 Carol (FA) vs Ryan (SDE) pipeline | positionWords 值不同（FA=253, SDE!=253） | 两次请求比较 |
 | 3.8 | Global SOUL 写保护 | PUT /security/global-soul 写入新内容，再读回 | 写入成功 + 内容匹配 + audit 产生 | 写-读-audit 三步验证，最后还原 |
 
@@ -55,11 +55,11 @@
 
 | # | 场景 | 操作 | 预期 | 验证方式 |
 |---|------|------|------|---------|
-| 4.1 | FA 工具白名单 | GET /playground/pipeline/emp-carol | planA.tools = [web_search, file] | 精确匹配 |
-| 4.2 | SDE 工具白名单 | GET /playground/pipeline/emp-ryan | planA.tools 包含 shell, code_execution, file_write | 包含检查 |
-| 4.3 | AE 工具白名单 | GET /playground/pipeline/emp-mike | planA.tools 不包含 shell, code_execution | 排除检查 |
-| 4.4 | DevOps 工具白名单 | GET /playground/pipeline/emp-chris | planA.tools 包含 shell（DevOps 需要运维） | 包含检查 |
-| 4.5 | Executive 工具白名单 | GET /playground/pipeline/emp-peter | 所有 6 工具都有（exec profile） | length=6 |
+| 4.1 | FA 工具白名单 | GET /playground/pipeline/vstecs-fin1 | planA.tools = [web_search, file] | 精确匹配 |
+| 4.2 | SDE 工具白名单 | GET /playground/pipeline/vstecs-RDadmin | planA.tools 包含 shell, code_execution, file_write | 包含检查 |
+| 4.3 | AE 工具白名单 | GET /playground/pipeline/vstecs-sales1 | planA.tools 不包含 shell, code_execution | 排除检查 |
+| 4.4 | DevOps 工具白名单 | GET /playground/pipeline/vstecs-ITadmin | planA.tools 包含 shell（DevOps 需要运维） | 包含检查 |
+| 4.5 | Executive 工具白名单 | GET /playground/pipeline/vstecs-exec1 | 所有 6 工具都有（exec profile） | length=6 |
 | 4.6 | 修改岗位工具后 pipeline 更新 | PUT /security/positions/pos-fa/tools {tools: [web_search,file,browser]} → 验证 pipeline 变化 → 还原 | pipeline 中 tools 变为 3 个 | 写-读-还原 |
 
 ---
@@ -81,9 +81,9 @@
 
 | # | 场景 | 操作 | 预期 | 验证方式 |
 |---|------|------|------|---------|
-| 6.1 | 读 Carol USER.md | GET /workspace/file?key=emp-carol/workspace/USER.md | 包含 "Carol Zhang" + "Finance Analyst" | grep |
-| 6.2 | 读 Carol MEMORY.md | GET /workspace/file?key=emp-carol/workspace/MEMORY.md | 包含 seeded data: "budget"/"Q2"/"Engineering" | grep |
-| 6.3 | 读 JiaDe USER.md | GET /workspace/file?key=emp-jiade/workspace/USER.md | 包含 "JiaDe Wang" + "Solutions Architect" | grep |
+| 6.1 | 读 Carol USER.md | GET /workspace/file?key=vstecs-fin1/workspace/USER.md | 包含 "Carol Zhang" + "Finance Analyst" | grep |
+| 6.2 | 读 Carol MEMORY.md | GET /workspace/file?key=vstecs-fin1/workspace/MEMORY.md | 包含 seeded data: "budget"/"Q2"/"Engineering" | grep |
+| 6.3 | 读 JiaDe USER.md | GET /workspace/file?key=vstecs-admin/workspace/USER.md | 包含 "JiaDe Wang" + "Solutions Architect" | grep |
 | 6.4 | 写入 → 读回一致性 | PUT 写临时文件 → GET 读回 | 内容完全匹配 | 写-读比对 |
 | 6.5 | S3 round-trip（写 + 读 + 删） | 写 test.md → 读回验证 → 删除 → 再读确认 404 | 完整 CRUD 生命周期 | 4 步验证 |
 | 6.6 | Workspace tree | GET /workspace/tree?agent_id=agent-fa-carol | 返回文件列表包含 USER.md, MEMORY.md | 文件名检查 |
@@ -98,10 +98,10 @@
 |---|------|------|------|---------|
 | 7.1 | Simulate 模式 | POST /playground/send {mode: simulate, tenant: Carol} | source=simulate-bedrock, response 非空 | source 字段 |
 | 7.2 | Admin 模式 | POST /playground/send {mode: admin, message: "How many agents?"} | 有意义回复（提到数字或 agent） | response 长度>20 |
-| 7.3 | Pipeline config 完整性 | GET /playground/pipeline/emp-carol | 包含 soul, planA, model 三大字段 | 字段存在 |
-| 7.4 | Pipeline 不同员工不同结果 | 对比 emp-carol 和 emp-ryan 的 pipeline | tools 不同, positionWords 不同 | 差异比较 |
-| 7.5 | Playground events 有数据 | GET /playground/events?tenant_id=port__emp-carol (simulate 后) | 至少有审计事件 | count >= 0（验证端点工作） |
-| 7.6 | Profiles 包含所有岗位 | GET /playground/profiles | 返回 dict, 至少有 port__emp-carol 和 port__emp-ryan | key 检查 |
+| 7.3 | Pipeline config 完整性 | GET /playground/pipeline/vstecs-fin1 | 包含 soul, planA, model 三大字段 | 字段存在 |
+| 7.4 | Pipeline 不同员工不同结果 | 对比 vstecs-fin1 和 vstecs-RDadmin 的 pipeline | tools 不同, positionWords 不同 | 差异比较 |
+| 7.5 | Playground events 有数据 | GET /playground/events?tenant_id=port__vstecs-fin1 (simulate 后) | 至少有审计事件 | count >= 0（验证端点工作） |
+| 7.6 | Profiles 包含所有岗位 | GET /playground/profiles | 返回 dict, 至少有 port__vstecs-fin1 和 port__vstecs-RDadmin | key 检查 |
 
 ---
 
@@ -133,7 +133,7 @@
 | 9.5 | Trend 7 天 | GET /usage/trend | 每项有 date, openclawCost, totalRequests | 结构 + length>0 |
 | 9.6 | Budget 列表 | GET /usage/budgets | 每项有 department, budget, projected, status | 结构检查 |
 | 9.7 | Budget 更新 + 审计 | PUT /usage/budgets {departments: {Finance: 999}} → 读回 → 查 audit | budget 值变为 999 + audit 有 config_change | 写-读-audit |
-| 9.8 | My-budget（员工视角） | GET /usage/my-budget?emp_id=emp-carol | 返回 budget, used, remaining, source | 字段检查 |
+| 9.8 | My-budget（员工视角） | GET /usage/my-budget?emp_id=vstecs-fin1 | 返回 budget, used, remaining, source | 字段检查 |
 
 ---
 
@@ -180,7 +180,7 @@
 | 12.3 | Channel health | GET /admin/im-channels/health | 返回 lastActivity + messagesLast24h | 字段检查 |
 | 12.4 | Enrollment stats | GET /admin/im-channels/enrollment | totalWithAgent=20, bound/unbound 有值 | 精确检查 |
 | 12.5 | User mappings | GET /bindings/user-mappings | 返回数组 | 结构检查 |
-| 12.6 | 创建 mapping → 验证 → 删除 | POST mapping (emp-carol + test-channel + test-user) → GET 验证 → DELETE | 完整 CRUD 生命周期 | 写-读-删 |
+| 12.6 | 创建 mapping → 验证 → 删除 | POST mapping (vstecs-fin1 + test-channel + test-user) → GET 验证 → DELETE | 完整 CRUD 生命周期 | 写-读-删 |
 | 12.7 | Bot info config | GET /admin/im-bot-info | 返回 bot 配置 | 结构检查 |
 | 12.8 | Bindings 列表 | GET /bindings | 返回绑定数组, length >= 20（每人至少一个 portal binding） | length 检查 |
 
@@ -229,7 +229,7 @@
 
 | # | 场景 | 操作 | 预期 | 验证方式 |
 |---|------|------|------|---------|
-| 16.1 | 员工登录 | POST /auth/login (emp-carol) | 返回 token | token 非空 |
+| 16.1 | 员工登录 | POST /auth/login (vstecs-fin1) | 返回 token | token 非空 |
 | 16.2 | 员工 profile | GET /portal/profile | 包含 name=Carol Zhang, position, USER.md content | 字段检查 |
 | 16.3 | 员工 usage | GET /portal/usage | 包含 totalTokens, cost | 字段检查 |
 | 16.4 | 员工 skills | GET /portal/skills | 返回 available + restricted skills | 结构检查 |
@@ -321,11 +321,11 @@
 
 | # | 场景 | 操作 | 预期 | 验证方式 |
 |---|------|------|------|---------|
-| 21.1 | Carol MEMORY.md 含 seeded 上下文 | GET /workspace/file?key=emp-carol/workspace/MEMORY.md | 包含 "budget"/"Q2"/"Engineering Q2 budget" | content grep 多关键词 |
-| 21.2 | JiaDe MEMORY.md 有内容 | GET /workspace/file?key=emp-jiade/workspace/MEMORY.md | size > 0, 包含 "OpenClaw" 或其他 seeded 内容 | size + content |
+| 21.1 | Carol MEMORY.md 含 seeded 上下文 | GET /workspace/file?key=vstecs-fin1/workspace/MEMORY.md | 包含 "budget"/"Q2"/"Engineering Q2 budget" | content grep 多关键词 |
+| 21.2 | JiaDe MEMORY.md 有内容 | GET /workspace/file?key=vstecs-admin/workspace/MEMORY.md | size > 0, 包含 "OpenClaw" 或其他 seeded 内容 | size + content |
 | 21.3 | Agent memory overview API | GET /agents/agent-fa-carol/memory | 返回 memoryMdSize > 0, 或 totalFiles >= 0 | 结构检查 |
 | 21.4 | Portal profile 包含 memory preview | 用 Carol token GET /portal/profile | memoryPreview 字段非空, 长度 <= 2048 (2KB limit) | 字段+长度检查 |
-| 21.5 | Workspace 写→S3→读 round-trip | PUT /workspace/file 写 emp-carol/workspace/_e2e_memory_test.md → 再读回 → 删除 | 写入内容与读回完全一致 | 内容精确匹配 |
+| 21.5 | Workspace 写→S3→读 round-trip | PUT /workspace/file 写 vstecs-fin1/workspace/_e2e_memory_test.md → 再读回 → 删除 | 写入内容与读回完全一致 | 内容精确匹配 |
 | 21.6 | Daily memory 文件可查 | GET /agents/agent-fa-carol/memory 检查是否有 daily files (memory/*.md) | 返回文件列表（可能为空——如果没有 live 交互） | 结构检查 |
 
 ---
@@ -356,8 +356,8 @@
 | 23.2 | PII detection 配置 | GET /settings/security | piiDetection.enabled 存在，mode 有值 | 字段检查 |
 | 23.3 | Docker sandbox 配置 | GET /settings/security | dockerSandbox 字段存在（true/false） | 字段检查 |
 | 23.4 | 修改 security config + 审计 | PUT /settings/security {verboseAudit: true} → 查 audit → 还原 | config_change 审计产生 | 写-audit-还原 |
-| 23.5 | FA 无 shell → pipeline 验证 | GET /playground/pipeline/emp-carol | planA.tools 不含 shell, code_execution, file_write | 排除检查 |
-| 23.6 | SDE 有全部工具 → pipeline 验证 | GET /playground/pipeline/emp-ryan | planA.tools 含 shell + code_execution + file_write | 包含检查 |
+| 23.5 | FA 无 shell → pipeline 验证 | GET /playground/pipeline/vstecs-fin1 | planA.tools 不含 shell, code_execution, file_write | 排除检查 |
+| 23.6 | SDE 有全部工具 → pipeline 验证 | GET /playground/pipeline/vstecs-RDadmin | planA.tools 含 shell + code_execution + file_write | 包含检查 |
 | 23.7 | 修改 FA 工具 → pipeline 变化 → 还原 | PUT /security/positions/pos-fa/tools {profile:basic, tools:[web_search,file,browser]} → GET pipeline → 还原为 [web_search,file] | pipeline tools 变为 3 个 → 还原为 2 个 | 写-读-还原 |
 | 23.8 | Session 对话 PII 检测 | GET /monitor/sessions（如有活跃 session）→ session detail | planE 字段存在（PII 扫描结果数组） | 结构检查 |
 

@@ -9,26 +9,26 @@ import boto3
 from datetime import datetime, timezone
 
 EMPLOYEES = {
-    "emp-jiade":  {"name": "JiaDe Wang",    "pos": "pos-sa",     "posName": "Solutions Architect",       "dept": "Engineering"},
-    "emp-marcus": {"name": "Marcus Bell",   "pos": "pos-sa",     "posName": "Solutions Architect",       "dept": "Engineering"},
-    "emp-daniel": {"name": "Daniel Kim",    "pos": "pos-sa",     "posName": "Solutions Architect",       "dept": "Engineering"},
-    "emp-ryan":   {"name": "Ryan Park",     "pos": "pos-sde",    "posName": "Software Engineer",         "dept": "Backend Team"},
-    "emp-sophie": {"name": "Sophie Turner", "pos": "pos-sde",    "posName": "Software Engineer",         "dept": "Backend Team"},
-    "emp-nathan": {"name": "Nathan Brooks", "pos": "pos-sde",    "posName": "Software Engineer",         "dept": "Frontend Team"},
-    "emp-chris":  {"name": "Chris Morgan",  "pos": "pos-devops", "posName": "DevOps Engineer",           "dept": "Platform Team"},
-    "emp-lisa":   {"name": "Lisa Chen",     "pos": "pos-devops", "posName": "DevOps Engineer",           "dept": "Platform Team"},
-    "emp-tony":   {"name": "Tony Reed",     "pos": "pos-qa",     "posName": "QA Engineer",               "dept": "QA Team"},
-    "emp-mike":   {"name": "Mike Johnson",  "pos": "pos-ae",     "posName": "Account Executive",         "dept": "Enterprise Sales"},
-    "emp-sarah":  {"name": "Sarah Kim",     "pos": "pos-ae",     "posName": "Account Executive",         "dept": "Enterprise Sales"},
-    "emp-tom":    {"name": "Tom Wilson",    "pos": "pos-ae",     "posName": "Account Executive",         "dept": "SMB Sales"},
-    "emp-alex":   {"name": "Alex Rivera",   "pos": "pos-pm",     "posName": "Product Manager",           "dept": "Product"},
-    "emp-priya":  {"name": "Priya Patel",   "pos": "pos-pm",     "posName": "Product Manager",           "dept": "Product"},
-    "emp-carol":  {"name": "Carol Zhang",   "pos": "pos-fa",     "posName": "Finance Analyst",           "dept": "Finance"},
-    "emp-david":  {"name": "David Park",    "pos": "pos-fa",     "posName": "Finance Analyst",           "dept": "Finance"},
-    "emp-jenny":  {"name": "Jenny Liu",     "pos": "pos-hr",     "posName": "HR Specialist",             "dept": "HR & Admin"},
-    "emp-emma":   {"name": "Emma Chen",     "pos": "pos-csm",    "posName": "Customer Success Manager",  "dept": "Customer Success"},
-    "emp-rachel": {"name": "Rachel Li",     "pos": "pos-legal",  "posName": "Legal Counsel",             "dept": "Legal & Compliance"},
-    "emp-peter":  {"name": "Peter Wu",      "pos": "pos-exec",   "posName": "Executive",                 "dept": "Engineering"},
+    "vstecs-admin":   {"name": "Kevin Zhao",    "pos": "pos-sa",     "posName": "Solutions Architect",       "dept": "Engineering"},
+    "vstecs-sa1":     {"name": "Andy Liu",      "pos": "pos-sa",     "posName": "Solutions Architect",       "dept": "Engineering"},
+    "vstecs-sa2":     {"name": "Brian Feng",    "pos": "pos-sa",     "posName": "Solutions Architect",       "dept": "Engineering"},
+    "vstecs-RDadmin": {"name": "Jason Xu",      "pos": "pos-sde",    "posName": "Software Engineer",         "dept": "Backend Team"},
+    "vstecs-dev1":    {"name": "Tina Huang",    "pos": "pos-sde",    "posName": "Software Engineer",         "dept": "Backend Team"},
+    "vstecs-dev2":    {"name": "Victor Qian",   "pos": "pos-sde",    "posName": "Software Engineer",         "dept": "Frontend Team"},
+    "vstecs-ITadmin": {"name": "Leo Zhang",     "pos": "pos-devops", "posName": "DevOps Engineer",           "dept": "Platform Team"},
+    "vstecs-devops1": {"name": "Grace Ding",    "pos": "pos-devops", "posName": "DevOps Engineer",           "dept": "Platform Team"},
+    "vstecs-qa1":     {"name": "Frank Jiang",   "pos": "pos-qa",     "posName": "QA Engineer",               "dept": "QA Team"},
+    "vstecs-sales1":  {"name": "Henry Luo",     "pos": "pos-ae",     "posName": "Account Executive",         "dept": "Enterprise Sales"},
+    "vstecs-sales2":  {"name": "Ivy Sun",       "pos": "pos-ae",     "posName": "Account Executive",         "dept": "Enterprise Sales"},
+    "vstecs-sales3":  {"name": "Oscar Ye",      "pos": "pos-ae",     "posName": "Account Executive",         "dept": "SMB Sales"},
+    "vstecs-pm1":     {"name": "Diana Wen",     "pos": "pos-pm",     "posName": "Product Manager",           "dept": "Product"},
+    "vstecs-pm2":     {"name": "Nina Gao",      "pos": "pos-pm",     "posName": "Product Manager",           "dept": "Product"},
+    "vstecs-fin1":    {"name": "Stella Zhu",    "pos": "pos-fa",     "posName": "Finance Analyst",           "dept": "Finance"},
+    "vstecs-fin2":    {"name": "Ray Cheng",     "pos": "pos-fa",     "posName": "Finance Analyst",           "dept": "Finance"},
+    "vstecs-hr1":     {"name": "Megan Xie",     "pos": "pos-hr",     "posName": "HR Specialist",             "dept": "HR & Admin"},
+    "vstecs-csm1":    {"name": "Cathy Bai",     "pos": "pos-csm",    "posName": "Customer Success Manager",  "dept": "Customer Success"},
+    "vstecs-legal1":  {"name": "Wendy Shen",    "pos": "pos-legal",  "posName": "Legal Counsel",             "dept": "Legal & Compliance"},
+    "vstecs-exec1":   {"name": "Patrick Tan",   "pos": "pos-exec",   "posName": "Executive",                 "dept": "Engineering"},
 }
 
 USER_TEMPLATES = {
@@ -74,7 +74,7 @@ def seed(bucket: str, region: str):
         name = info["name"]
 
         # IDENTITY.md
-        identity = f"# Agent Identity\n\n- **Name**: {name}'s AI Assistant\n- **Position**: {info['posName']}\n- **Department**: {info['dept']}\n- **Company**: ACME Corp\n- **Platform**: OpenClaw Enterprise\n"
+        identity = f"# Agent Identity\n\n- **Name**: {name}'s AI Assistant\n- **Position**: {info['posName']}\n- **Department**: {info['dept']}\n- **Company**: VSTECS Corp\n- **Platform**: OpenClaw Enterprise\n"
         s3.put_object(Bucket=bucket, Key=f"{prefix}IDENTITY.md", Body=identity.encode(), ContentType="text/markdown")
 
         # USER.md
@@ -82,7 +82,7 @@ def seed(bucket: str, region: str):
         s3.put_object(Bucket=bucket, Key=f"{prefix}USER.md", Body=user_md.encode(), ContentType="text/markdown")
 
         # MEMORY.md
-        memory = f"# Long-term Memory\n\n- Agent activated on {today}\n- Position: {info['posName']} at ACME Corp\n- Department: {info['dept']}\n"
+        memory = f"# Long-term Memory\n\n- Agent activated on {today}\n- Position: {info['posName']} at VSTECS Corp\n- Department: {info['dept']}\n"
         s3.put_object(Bucket=bucket, Key=f"{prefix}MEMORY.md", Body=memory.encode(), ContentType="text/markdown")
 
         # Daily memory

@@ -90,8 +90,8 @@
 
 **Browser (preferred):**
 ```
-Production: https://openclaw.awspsa.com        (emp-jiade / wjiad@amazon)
-Test/Dev:   https://dev-openclaw.awspsa.com    (emp-jiade / e2e-test-2026)
+Production: https://openclaw.awspsa.com        (vstecs-admin / wjiad@amazon)
+Test/Dev:   https://dev-openclaw.awspsa.com    (vstecs-admin / e2e-test-2026)
 ```
 
 **SSM Port Forward (direct, no CloudFront):**

@@ -5,16 +5,16 @@ import { LogIn, AlertCircle } from 'lucide-react';
 import VSTECSLogo from '../components/VSTECSLogo';
 
 const DEMO_ACCOUNTS = [
-  { id: 'emp-jiade',  name: 'JiaDe Wang',    role: 'Admin',    dept: 'Engineering', desc: 'Admin · Solutions Architect · full platform access' },
-  { id: 'emp-chris',  name: 'Chris Morgan',  role: 'Admin',    dept: 'Platform',    desc: 'Admin · DevOps Engineer' },
-  { id: 'emp-peter',  name: 'Peter Wu',      role: 'Employee', dept: 'Engineering', desc: 'Executive Agent · all tools' },
-  { id: 'emp-alex',   name: 'Alex Rivera',   role: 'Manager',  dept: 'Product',     desc: 'Product Manager · Jira · research' },
-  { id: 'emp-mike',   name: 'Mike Johnson',  role: 'Manager',  dept: 'Sales',       desc: 'Account Executive · CRM · WhatsApp' },
-  { id: 'emp-jenny',  name: 'Jenny Liu',     role: 'Manager',  dept: 'HR',          desc: 'HR Specialist · email · calendar' },
-  { id: 'emp-ryan',   name: 'Ryan Park',     role: 'Employee', dept: 'Engineering', desc: 'Software Engineer · shell · code · GitHub' },
-  { id: 'emp-carol',  name: 'Carol Zhang',   role: 'Employee', dept: 'Finance',     desc: 'Finance Analyst · Excel · SAP' },
-  { id: 'emp-emma',   name: 'Emma Chen',     role: 'Employee', dept: 'Customer',    desc: 'Customer Success · CRM · Slack' },
-  { id: 'emp-rachel', name: 'Rachel Li',     role: 'Employee', dept: 'Legal',       desc: 'Legal Counsel · research · file' },
+  { id: 'vstecs-admin',   name: 'Kevin Zhao',    role: 'Admin',    dept: 'Engineering', desc: 'Admin · Solutions Architect · full platform access' },
+  { id: 'vstecs-ITadmin', name: 'Leo Zhang',     role: 'Admin',    dept: 'Platform',    desc: 'Admin · DevOps Engineer' },
+  { id: 'vstecs-exec1',   name: 'Patrick Tan',   role: 'Employee', dept: 'Engineering', desc: 'Executive Agent · all tools' },
+  { id: 'vstecs-pm1',     name: 'Diana Wen',     role: 'Manager',  dept: 'Product',     desc: 'Product Manager · Jira · research' },
+  { id: 'vstecs-sales1',  name: 'Henry Luo',     role: 'Manager',  dept: 'Sales',       desc: 'Account Executive · CRM · WhatsApp' },
+  { id: 'vstecs-hr1',     name: 'Megan Xie',     role: 'Manager',  dept: 'HR',          desc: 'HR Specialist · email · calendar' },
+  { id: 'vstecs-RDadmin', name: 'Jason Xu',      role: 'Employee', dept: 'Engineering', desc: 'Software Engineer · shell · code · GitHub' },
+  { id: 'vstecs-fin1',    name: 'Stella Zhu',    role: 'Employee', dept: 'Finance',     desc: 'Finance Analyst · Excel · SAP' },
+  { id: 'vstecs-csm1',    name: 'Cathy Bai',     role: 'Employee', dept: 'Customer',    desc: 'Customer Success · CRM · Slack' },
+  { id: 'vstecs-legal1',  name: 'Wendy Shen',    role: 'Employee', dept: 'Legal',       desc: 'Legal Counsel · research · file' },
 ];
 
 export default function Login() {
@@ -72,7 +72,7 @@ export default function Login() {
               <label className="block text-sm text-text-muted mb-1">Employee ID</label>
               <input
                 type="text" value={empId} onChange={e => setEmpId(e.target.value)}
-                placeholder="emp-jiade or EMP-030"
+                placeholder="vstecs-admin or EMP-001"
                 className="w-full rounded-lg border border-dark-border bg-dark-bg px-4 py-2.5 text-sm text-text-primary placeholder:text-text-muted focus:border-primary focus:outline-none"
               />
             </div>

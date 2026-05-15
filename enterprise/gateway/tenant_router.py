@@ -608,7 +608,7 @@ class TenantRouterHandler(BaseHTTPRequestHandler):
     def _handle_stop_session(self):
         """Stop an AgentCore session to force workspace refresh on next invoke.
         Used by Admin Console after config changes (USER.md, permissions, model override).
-        POST /stop-session { "emp_id": "emp-carol" }
+        POST /stop-session { "emp_id": "vstecs-fin1" }
         """
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         try:

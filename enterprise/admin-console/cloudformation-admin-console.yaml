@@ -613,7 +613,7 @@ Outputs:
     Description: "Admin Console 访问地址"
 
   LoginInfo:
-    Value: !Sub "Admin: emp-z3 / ${AdminPassword} | Manager: emp-lin / ${AdminPassword} | Employee: emp-emma / ${AdminPassword}"
+    Value: !Sub "Admin: emp-z3 / ${AdminPassword} | Manager: emp-lin / ${AdminPassword} | Employee: vstecs-csm1 / ${AdminPassword}"
     Description: "登录账号（Admin/Manager/Employee 三种角色）"
 
   DynamoDBTableName:

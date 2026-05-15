@@ -73,7 +73,7 @@ The script runs 8 steps (~30 minutes total):
   Access Admin Console:
     aws ssm start-session --target i-<instance-id> ...
     → Open http://localhost:8099
-    → Login: emp-jiade / password: <your ADMIN_PASSWORD>
+    → Login: vstecs-admin / password: <your ADMIN_PASSWORD>
 ```
 
 **Re-deploy options:**
@@ -134,7 +134,7 @@ aws s3 ls "s3://$BUCKET/_shared/soul/positions/" | head -5
 ADMIN_PW=$(grep ADMIN_PASSWORD /etc/openclaw/env | cut -d= -f2)
 curl -s -X POST http://localhost:8099/api/v1/auth/login \
   -H "Content-Type: application/json" \
-  -d "{\"employeeId\":\"emp-jiade\",\"password\":\"$ADMIN_PW\"}" | python3 -c \
+  -d "{\"employeeId\":\"vstecs-admin\",\"password\":\"$ADMIN_PW\"}" | python3 -c \
   "import json,sys; d=json.load(sys.stdin); print('Login OK' if 'token' in d else f'FAIL: {d}')"
 # Expected: Login OK
 ```
@@ -156,7 +156,7 @@ aws ssm start-session --target <INSTANCE_ID> --region <REGION> \
   --parameters '{"portNumber":["8099"],"localPortNumber":["8099"]}'
 
 # Open browser: http://localhost:8099
-# Login: emp-jiade / <your ADMIN_PASSWORD>
+# Login: vstecs-admin / <your ADMIN_PASSWORD>
 ```
 
 ### 4.2 Review Organization Structure

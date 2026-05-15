@@ -482,10 +482,10 @@ Zero IT friction. Employees self-service in 30 seconds. Admins see all connectio
 6. **All 20 seed employees share one `ADMIN_PASSWORD`** — each must change on first login. Roles are seeded separately by `seed_roles.py`.
 
 **Verify it works** (after deployment):
-- Login as `emp-jiade` (admin) → Dashboard shows 13 depts, 11 positions, 20 employees
-- Playground → Carol Zhang (Finance) → "run git status" → refused (Restricted tier)
-- Playground → Ryan Park (SDE) → "run git status" → executes (Engineering tier)
-- Portal → Carol Zhang → Chat → "Who are you?" → "Finance Analyst Agent at ACME Corp"
+- Login as `vstecs-admin` (admin) → Dashboard shows 13 depts, 11 positions, 20 employees
+- Playground → Stella Zhu (Finance) → "run git status" → refused (Restricted tier)
+- Playground → Jason Xu (SDE) → "run git status" → executes (Engineering tier)
+- Portal → Stella Zhu → Chat → "Who are you?" → "Finance Analyst Agent at ACME Corp"
 - Security Center → 4 runtimes all READY
 
 **If AgentCore returns 500:** check CloudWatch group `/aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT` for `openclaw returned empty output` — wrong openclaw version. Rebuild with `openclaw@2026.3.24`.
@@ -742,7 +742,7 @@ aws ssm start-session --target $INSTANCE_ID --region $REGION \
   --parameters '{"portNumber":["8099"],"localPortNumber":["8199"]}'
 ```
 
-Open **http://localhost:8199** → login with Employee ID `emp-jiade` (admin) and `ADMIN_PASSWORD` from your `.env`. First login requires setting a personal password.
+Open **http://localhost:8199** → login with Employee ID `vstecs-admin` (admin) and `ADMIN_PASSWORD` from your `.env`. First login requires setting a personal password.
 
 > **Public access:** Use CloudFront with an Elastic IP on the EC2. Set `PUBLIC_URL` in `/etc/openclaw/env` (e.g. `PUBLIC_URL=https://your-domain.com`) for correct Digital Twin URLs — the admin console reads this file via `EnvironmentFile` in the systemd service.
 
@@ -767,8 +767,8 @@ Employees self-service pair via Portal → Connect IM (QR code). No admin approv
 ## What to Test
 
 ### 1. SOUL Injection (core differentiator)
-Login as **Carol Zhang** (emp-carol, Finance) → Chat → "Who are you?" → **"ACME Corp Finance Analyst"**
-Login as **Ryan Park** (emp-ryan, SDE) → Chat → "Who are you?" → **"ACME Corp Software Engineer"**
+Login as **Stella Zhu** (vstecs-fin1, Finance) → Chat → "Who are you?" → **"ACME Corp Finance Analyst"**
+Login as **Jason Xu** (vstecs-RDadmin, SDE) → Chat → "Who are you?" → **"ACME Corp Software Engineer"**
 Same LLM. Completely different identities.
 
 ### 2. Digital Twin
@@ -777,22 +777,22 @@ Turn ON → copy the URL → open in incognito → chat with the AI version of t
 Turn OFF → incognito tab gets 404 immediately
 
 ### 3. Org Directory (Knowledge Base)
-Ask any agent: *"Who should I contact for a code review?"* or *"What does Marcus Bell do?"*
+Ask any agent: *"Who should I contact for a code review?"* or *"What does Andy Liu do?"*
 → Agent reads `kb-org-directory` (seeded into every position) and answers with the right person's name, role, IM channel, and agent capabilities
 
 ### 4. Permission Boundaries (4-tier)
-Carol Zhang (Restricted): "Run git status" → **Refused** (Finance, no shell)
-Ryan Park (Engineering): "Run git status" → **Executed** (SDE, has shell)
-Peter Wu (Executive): Any command → **Executed** (Executive tier, Sonnet 4.6)
+Stella Zhu (Restricted): "Run git status" → **Refused** (Finance, no shell)
+Jason Xu (Engineering): "Run git status" → **Executed** (SDE, has shell)
+Patrick Tan (Executive): Any command → **Executed** (Executive tier, Sonnet 4.6)
 
 ### 5. Multi-Runtime
-Login as **Peter Wu** (emp-peter) or **JiaDe Wang** (emp-jiade) → these route to the Executive AgentCore Runtime:
+Login as **Patrick Tan** (vstecs-exec1) or **Kevin Zhao** (vstecs-admin) → these route to the Executive AgentCore Runtime:
 - Model: Claude Sonnet 4.6 (vs Nova 2 Lite for standard)
 - Tools: all unlocked
 - IAM: full S3, all Bedrock models, cross-dept DynamoDB
 
 ### 6. Memory Persistence
-Chat as **JiaDe Wang** (Discord) → come back after 15 min → **agent recalls previous conversation**
+Chat as **Kevin Zhao** (Discord) → come back after 15 min → **agent recalls previous conversation**
 Same memory shared across Discord, Telegram, and Portal.
 
 > **How it works:** Each turn is synced to S3 immediately after the response (not just on session end). The next microVM downloads the workspace at session start and has full context. If memory doesn't appear, re-run `seed_all_workspaces.py` to reset S3 workspace state.
@@ -839,26 +839,26 @@ To add a new KB: Admin Console → Knowledge Base → upload Markdown → Assign
 
 | Employee ID | Name | Role | Position | Dept | Runtime Tier | Channels |
 |-------------|------|------|----------|------|-------------|----------|
-| **emp-jiade** | **JiaDe Wang** | **admin** | Solutions Architect | Engineering | Executive | Discord, Slack |
-| **emp-chris** | **Chris Morgan** | **admin** | DevOps Engineer | Platform Team | Engineering | Slack, Telegram |
-| emp-alex | Alex Rivera | manager | Product Manager | Product | Standard | Slack |
-| emp-mike | Mike Johnson | manager | Account Executive | Enterprise Sales | Standard | WhatsApp, Slack |
-| emp-jenny | Jenny Liu | manager | HR Specialist | HR & Admin | Standard | Slack |
-| emp-peter | Peter Wu | employee | Executive | Engineering | Executive | Discord |
-| emp-ryan | Ryan Park | employee | Software Engineer | Backend Team | Engineering | Slack, Discord |
-| emp-carol | Carol Zhang | employee | Finance Analyst | Finance | Restricted | Slack, Telegram |
-| emp-rachel | Rachel Li | employee | Legal Counsel | Legal & Compliance | Restricted | Slack |
-| emp-emma | Emma Chen | employee | Customer Success Manager | Customer Success | Standard | Slack, WhatsApp |
-| emp-marcus | Marcus Bell | employee | Solutions Architect | Engineering | Executive | Slack, Telegram |
-| emp-sophie | Sophie Turner | employee | Software Engineer | Backend Team | Engineering | Slack |
-| emp-nathan | Nathan Brooks | employee | Software Engineer | Frontend Team | Engineering | Slack |
-| emp-lisa | Lisa Chen | employee | DevOps Engineer | Platform Team | Engineering | Slack |
-| emp-tony | Tony Reed | employee | QA Engineer | QA Team | Engineering | Slack |
-| emp-sarah | Sarah Kim | employee | Account Executive | Enterprise Sales | Standard | WhatsApp |
-| emp-tom | Tom Wilson | employee | Account Executive | SMB Sales | Standard | Slack |
-| emp-priya | Priya Patel | employee | Product Manager | Product | Standard | Slack, Discord |
-| emp-david | David Park | employee | Finance Analyst | Finance | Restricted | Slack |
-| emp-daniel | Daniel Kim | employee | Solutions Architect | Engineering | Executive | Slack |
+| **vstecs-admin** | **Kevin Zhao** | **admin** | Solutions Architect | Engineering | Executive | Discord, Slack |
+| **vstecs-ITadmin** | **Leo Zhang** | **admin** | DevOps Engineer | Platform Team | Engineering | Slack, Telegram |
+| vstecs-pm1 | Diana Wen | manager | Product Manager | Product | Standard | Slack |
+| vstecs-sales1 | Henry Luo | manager | Account Executive | Enterprise Sales | Standard | WhatsApp, Slack |
+| vstecs-hr1 | Megan Xie | manager | HR Specialist | HR & Admin | Standard | Slack |
+| vstecs-exec1 | Patrick Tan | employee | Executive | Engineering | Executive | Discord |
+| vstecs-RDadmin | Jason Xu | employee | Software Engineer | Backend Team | Engineering | Slack, Discord |
+| vstecs-fin1 | Stella Zhu | employee | Finance Analyst | Finance | Restricted | Slack, Telegram |
+| vstecs-legal1 | Wendy Shen | employee | Legal Counsel | Legal & Compliance | Restricted | Slack |
+| vstecs-csm1 | Cathy Bai | employee | Customer Success Manager | Customer Success | Standard | Slack, WhatsApp |
+| vstecs-sa1 | Andy Liu | employee | Solutions Architect | Engineering | Executive | Slack, Telegram |
+| vstecs-dev1 | Tina Huang | employee | Software Engineer | Backend Team | Engineering | Slack |
+| vstecs-dev2 | Victor Qian | employee | Software Engineer | Frontend Team | Engineering | Slack |
+| vstecs-devops1 | Grace Ding | employee | DevOps Engineer | Platform Team | Engineering | Slack |
+| vstecs-qa1 | Frank Jiang | employee | QA Engineer | QA Team | Engineering | Slack |
+| vstecs-sales2 | Ivy Sun | employee | Account Executive | Enterprise Sales | Standard | WhatsApp |
+| vstecs-sales3 | Oscar Ye | employee | Account Executive | SMB Sales | Standard | Slack |
+| vstecs-pm2 | Nina Gao | employee | Product Manager | Product | Standard | Slack, Discord |
+| vstecs-fin2 | Ray Cheng | employee | Finance Analyst | Finance | Restricted | Slack |
+| vstecs-sa2 | Brian Feng | employee | Solutions Architect | Engineering | Executive | Slack |
 
 **Runtime tier assignment** (via Security Center → Position → Runtime mapping):
 - **Executive**: Solutions Architect (pos-sa)

@@ -16,7 +16,7 @@ aws ssm start-session --target i-036bfe702e14e2866 --region us-west-2 \
 Open browser: http://localhost:8099
 
 Login:
-- Employee ID: `emp-jiade`
+- Employee ID: `vstecs-admin`
 - Password: `E2eTest2026!`
 
 ---
@@ -91,7 +91,7 @@ aws s3 ls s3://openclaw-e2e-test-263168716248/_shared/soul/global/ --region us-w
 
 | # | Task | Where |
 |---|------|-------|
-| 1 | Login as admin | http://localhost:8099 → emp-jiade / E2eTest2026! |
+| 1 | Login as admin | http://localhost:8099 → vstecs-admin / E2eTest2026! |
 | 2 | Check Dashboard | Sidebar → Dashboard |
 | 3 | Review org structure | Sidebar → Organization → Departments / Positions / Employees |
 | 4 | Edit Global SOUL | Sidebar → Security Center → Policies tab → "Edit Global SOUL" |
@@ -112,9 +112,9 @@ aws s3 ls s3://openclaw-e2e-test-263168716248/_shared/soul/global/ --region us-w
 Open browser: http://localhost:8099/portal
 
 Login as any employee:
-- `emp-carol` / `E2eTest2026!` (Finance Analyst)
-- `emp-ryan` / `E2eTest2026!` (Software Engineer)
-- `emp-sarah` / `E2eTest2026!` (Solutions Architect)
+- `vstecs-fin1` / `E2eTest2026!` (Finance Analyst)
+- `vstecs-RDadmin` / `E2eTest2026!` (Software Engineer)
+- `vstecs-sales2` / `E2eTest2026!` (Solutions Architect)
 
 Test:
 - Portal → Chat → "who are you?"
@@ -137,7 +137,7 @@ Test:
 | ECR | `263168716248.dkr.ecr.us-west-2.amazonaws.com/openclaw-e2e-test-agent-container` |
 | Admin URL | http://localhost:8099 (via SSM port-forward) |
 | Gateway URL | http://localhost:18789/?token=\<from SSM\> (via SSM port-forward) |
-| Admin Login | emp-jiade / E2eTest2026! |
+| Admin Login | vstecs-admin / E2eTest2026! |
 
 ---
 

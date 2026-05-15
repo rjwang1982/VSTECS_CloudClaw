@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useChangePassword } from '../hooks/useApi';
 import { AlertCircle, Check, X, LogOut, KeyRound } from 'lucide-react';
-import ClawForgeLogo from '../components/ClawForgeLogo';
+import VSTECSLogo from '../components/VSTECSLogo';
 
 const COMPLEXITY_RULES = [
   { label: 'At least 8 characters', test: (pw: string) => pw.length >= 8 },
@@ -52,7 +52,7 @@ export default function ForceChangePassword() {
       <div className="w-full max-w-md">
         {/* Logo */}
         <div className="text-center mb-8">
-          <div className="inline-flex mb-4"><ClawForgeLogo size={56} animate="idle" /></div>
+          <div className="inline-flex mb-4"><VSTECSLogo variant="vertical" size={56} /></div>
           <h1 className="text-2xl font-bold text-text-primary">Set Your Password</h1>
           <p className="text-sm text-text-muted mt-1">
             Welcome, <span className="text-primary-light">{user?.name}</span>. You must set a personal password before continuing.

@@ -368,9 +368,9 @@ done
 
 # ── G2: 员工身份识别 (4 tier × 2 = 8 调用) ──────
 echo "=== G2: Employee Identity ==="
-# Standard: emp-carol (Finance Analyst) — "What is my name and role?"
+# Standard: vstecs-fin1 (Finance Analyst) — "What is my name and role?"
 # Restricted: emp-legal01 — "Who am I?"
-# Engineering: emp-ryan (SDE) — "What department am I in?"
+# Engineering: vstecs-RDadmin (SDE) — "What department am I in?"
 # Executive: emp-w5 (SA) — "What is my position?"
 
 # ── G3: 工具使用 (4 场景 × 2 = 8 调用) ──────────
@@ -391,8 +391,8 @@ echo "=== G4: Guardrail ==="
 echo "=== G5: Memory Persistence ==="
 # emp-w5: "Remember my favorite color is blue" → 回复
 # emp-w5: "What is my favorite color?" → 预期回答 blue
-# emp-ryan: "My project deadline is June 15" → 回复
-# emp-ryan: "When is my deadline?" → 预期回答 June 15
+# vstecs-RDadmin: "My project deadline is June 15" → 回复
+# vstecs-RDadmin: "When is my deadline?" → 预期回答 June 15
 # 验证 EFS: /mnt/efs/emp-w5/workspace/memory/ 有文件
 
 # ── G6: 并发请求 (3 调用同时) ────────────────────

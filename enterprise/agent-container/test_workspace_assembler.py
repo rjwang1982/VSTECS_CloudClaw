@@ -95,11 +95,11 @@ class TestPrefixParsing(unittest.TestCase):
 
     # Path 3 & 4: employee sessions (Portal + IM channels after DDB resolve)
     def test_emp_prefix(self):
-        self.assertEqual(self._p("emp__emp-jiade__a1b2c3d4e5f678901"), "emp")
+        self.assertEqual(self._p("emp__vstecs-admin__a1b2c3d4e5f678901"), "emp")
 
     # Path 3 legacy: portal alias
     def test_pt_prefix(self):
-        self.assertEqual(self._p("pt__emp-carol__a1b2c3d4e5f678901"), "pt")
+        self.assertEqual(self._p("pt__vstecs-fin1__a1b2c3d4e5f678901"), "pt")
 
     # Path 2: Playground
     def test_pgnd_prefix(self):
@@ -144,9 +144,9 @@ class TestSessionContextContent(unittest.TestCase):
     # ── Path 2: Playground ──────────────────────────────────────────────────
 
     def test_playground_mode_content(self):
-        ctx = _build_session_context("pgnd", "JiaDe Wang", "pgnd__emp-jiade__xyz")
+        ctx = _build_session_context("pgnd", "Kevin Zhao", "pgnd__vstecs-admin__xyz")
         self.assertIn("**Mode:** Playground (Admin Test)", ctx)
-        self.assertIn("**Employee Being Simulated:** JiaDe Wang", ctx)
+        self.assertIn("**Employee Being Simulated:** Kevin Zhao", ctx)
         self.assertIn("**Operator:** IT Administrator", ctx)
         self.assertIn("read-only with respect to memory", ctx)
         self.assertNotIn("Authenticated User", ctx)
@@ -159,16 +159,16 @@ class TestSessionContextContent(unittest.TestCase):
     # ── Path 3 + 4: Employee Portal / IM Channels (shared emp__ session) ───
 
     def test_employee_session_content(self):
-        ctx = _build_session_context("emp", "Carol Zhang", "emp__emp-carol__abc")
+        ctx = _build_session_context("emp", "Stella Zhu", "emp__vstecs-fin1__abc")
         self.assertIn("**Mode:** Employee Session", ctx)
-        self.assertIn("**Authenticated User:** Carol Zhang", ctx)
+        self.assertIn("**Authenticated User:** Stella Zhu", ctx)
         self.assertIn("**Verification:** Confirmed", ctx)
         self.assertIn("full read/write access", ctx)
 
     def test_pt_alias_same_as_emp(self):
         """pt__ (portal alias) must produce identical Employee Session content."""
-        ctx_emp = _build_session_context("emp", "Carol Zhang", "emp__emp-carol__abc")
-        ctx_pt  = _build_session_context("pt",  "Carol Zhang", "pt__emp-carol__abc")
+        ctx_emp = _build_session_context("emp", "Stella Zhu", "emp__vstecs-fin1__abc")
+        ctx_pt  = _build_session_context("pt",  "Stella Zhu", "pt__vstecs-fin1__abc")
         # Mode and key fields are identical
         self.assertIn("**Mode:** Employee Session", ctx_pt)
         self.assertIn("**Authenticated User:** Carol Zhang", ctx_pt)
@@ -196,8 +196,8 @@ class TestSessionContextContent(unittest.TestCase):
 
     def test_digital_twin_name_in_both_fields(self):
         """Employee name appears in both Represented Employee and the body text."""
-        ctx = _build_session_context("twin", "JiaDe Wang", "twin__emp-jiade__def")
-        self.assertEqual(ctx.count("JiaDe Wang"), 3)  # header + 2 body refs
+        ctx = _build_session_context("twin", "Kevin Zhao", "twin__vstecs-admin__def")
+        self.assertEqual(ctx.count("Kevin Zhao"), 3)  # header + 2 body refs
 
     # ── Raw IM fallback (unresolved user before pairing) ────────────────────
 
@@ -221,11 +221,11 @@ class TestSessionContextContent(unittest.TestCase):
     def test_emp_name_fallback_to_b_id(self):
         """If DDB lookup fails, emp_name is empty → verified_name falls back to _b_id."""
         emp_name = ""  # DDB failed
-        _b_id = "emp-jiade"
+        _b_id = "vstecs-admin"
         verified_name = emp_name or _b_id
-        self.assertEqual(verified_name, "emp-jiade")
-        ctx = _build_session_context("emp", verified_name, "emp__emp-jiade__abc")
-        self.assertIn("emp-jiade", ctx)
+        self.assertEqual(verified_name, "vstecs-admin")
+        ctx = _build_session_context("emp", verified_name, "emp__vstecs-admin__abc")
+        self.assertIn("vstecs-admin", ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +287,7 @@ class TestAssembleWorkspaceSessionContext(unittest.TestCase):
         return ""
 
     def test_emp_session_written_to_disk(self):
-        content = self._run_assemble("emp__emp-carol__a1b2c3d4e5f678901")
+        content = self._run_assemble("emp__vstecs-fin1__a1b2c3d4e5f678901")
         self.assertIn("Employee Session", content)
         self.assertIn("Test User", content)
 
@@ -319,8 +319,8 @@ class TestSessionIdMatrix(unittest.TestCase):
 
     MATRIX = [
         # (tenant_id,                              expected_mode_text)
-        ("emp__emp-jiade__a1b2c3d4e5f678901",   "Employee Session"),
-        ("pt__emp-carol__a1b2c3d4e5f678901",    "Employee Session"),   # legacy alias
+        ("emp__vstecs-admin__a1b2c3d4e5f678901",   "Employee Session"),
+        ("pt__vstecs-fin1__a1b2c3d4e5f678901",    "Employee Session"),   # legacy alias
         ("pgnd__emp-sharon__a1b2c3d4e5f67890",  "Playground"),
         ("twin__emp-sharon__a1b2c3d4e5f67890",  "Digital Twin"),
         ("admin__it__a1b2c3d4e5f67890123456",   "IT Admin Assistant"),
