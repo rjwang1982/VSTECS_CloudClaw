@@ -471,24 +471,55 @@ def portal_chat(body: PortalChatMessage, authorization: str = Header(default="")
     except Exception as e:
         print(f"[portal-chat] Error calling Tenant Router: {e}")
 
-    # Fallback when AgentCore is unreachable
-    # Read employee's workspace to provide context-aware response
+    # Fallback: Direct Bedrock Converse with employee's real SOUL
+    # (Used when AgentCore/Tenant Router is not deployed — e.g. Marketplace one-click)
     soul_content = s3ops.read_file(f"_shared/soul/global/SOUL.md") or ""
     pos_soul = s3ops.read_file(f"_shared/soul/positions/{user.position_id}/SOUL.md") or ""
     user_md = s3ops.read_file(f"{user.employee_id}/workspace/USER.md") or ""
+    memory_md = s3ops.read_file(f"{user.employee_id}/workspace/MEMORY.md") or ""
 
-    context_parts = []
-    if pos_soul:
-        context_parts.append(f"[Position SOUL loaded: {len(pos_soul)} chars]")
-    if user_md:
-        context_parts.append(f"[USER.md loaded: {len(user_md)} chars]")
+    system_prompt = f"{soul_content}\n\n{pos_soul}\n\n{user_md}\n\n{memory_md}".strip()
+    if not system_prompt:
+        system_prompt = f"You are {my_binding.get('agentName', 'an AI assistant')} for {user.name} ({user.position_id})."
 
-    return {
-        "response": f"I'm your {my_binding.get('agentName', 'AI assistant')}. I'm currently running in offline mode (AgentCore unavailable).\n\n{''.join(context_parts)}\n\nPlease try again later, or use your messaging channel ({my_binding.get('channel', 'Slack')}) for full agent capabilities.",
-        "agentId": my_binding.get("agentId"),
-        "agentName": my_binding.get("agentName"),
-        "source": "fallback",
-    }
+    try:
+        bedrock = boto3.client("bedrock-runtime", region_name=GATEWAY_REGION)
+        model_id = os.environ.get("BEDROCK_MODEL", os.environ.get("BEDROCK_MODEL_ID", "global.amazon.nova-2-lite-v1:0"))
+        resp = bedrock.converse(
+            modelId=model_id,
+            system=[{"text": system_prompt[:8000]}],
+            messages=[{"role": "user", "content": [{"text": body.message}]}],
+            inferenceConfig={"maxTokens": 2048, "temperature": 0.7},
+        )
+        reply = resp["output"]["message"]["content"][0]["text"]
+
+        # Audit trail
+        db.create_audit_entry({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "eventType": "agent_invocation",
+            "actorId": user.employee_id,
+            "actorName": user.name,
+            "targetType": "agent",
+            "targetId": my_binding.get("agentId", ""),
+            "detail": f"Portal chat (Bedrock direct): {body.message[:80]}",
+            "status": "success",
+        })
+
+        return {
+            "response": reply,
+            "agentId": my_binding.get("agentId"),
+            "agentName": my_binding.get("agentName"),
+            "source": "bedrock-direct",
+            "model": model_id,
+        }
+    except Exception as e:
+        print(f"[portal-chat] Bedrock Converse error: {e}")
+        return {
+            "response": f"I'm your {my_binding.get('agentName', 'AI assistant')}. Bedrock model is currently unavailable ({e}). Please ensure model access is enabled in the Bedrock console.",
+            "agentId": my_binding.get("agentId"),
+            "agentName": my_binding.get("agentName"),
+            "source": "error",
+        }
 
 
 @router.get("/api/v1/portal/profile")
