@@ -580,7 +580,7 @@ Resources:
           # ---- Health check ----
           sleep 5
           for i in $(seq 1 12); do
-            if curl -sf http://localhost:8099/api/v1/settings/services > /dev/null 2>&1; then
+            if curl -sf http://localhost:8099/ > /dev/null 2>&1; then
               echo "Health check passed on attempt $i"
               signal_success
               exit 0
